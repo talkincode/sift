@@ -1,5 +1,6 @@
 mod audit;
 mod config;
+mod diff;
 mod extract;
 mod model;
 mod query;
@@ -7,6 +8,7 @@ mod react;
 mod report;
 mod scanner;
 mod skills;
+mod surface;
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -39,6 +41,8 @@ fn main() -> ExitCode {
             CliCommand::Github(github) => run_github_intake(github),
             CliCommand::EvalCorpus(eval) => run_eval_corpus(eval),
             CliCommand::Query(q) => query::run_query(q),
+            CliCommand::Surface(s) => surface::run_surface(s),
+            CliCommand::Diff(d) => diff::run_diff(d),
         };
     }
 
@@ -1694,7 +1698,7 @@ fn audit_relative_path<'a>(path: &'a Path, root: &Path) -> &'a Path {
     path.strip_prefix(root).unwrap_or(path)
 }
 
-fn inspect_suspicious_artifact(
+pub(crate) fn inspect_suspicious_artifact(
     path: &str,
     size_bytes: u64,
     meta: &std::fs::Metadata,

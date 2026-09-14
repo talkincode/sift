@@ -1,0 +1,10 @@
+{
+  "name": "surface-fixture",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "node ./scripts/build.js"
+  },
+  "dependencies": {
+    "helper": "git+https://github.com/example/helper.git"
+  }
+}

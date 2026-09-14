@@ -15,3 +15,10 @@ reason = "reviewed git hook checked into .githooks/, no extension by design"
 path = "tests/fixtures/repo-intake/"
 rule = "binary_or_archive_extension"
 reason = "synthetic regression fixture for the suspicious-artifact detector"
+
+# Inert install-surface fixtures for tests/surface_cli.rs: the curl URL uses the
+# reserved .invalid TLD and no test ever executes them.
+[[allowlist]]
+path = "tests/fixtures/surface/"
+rule = "download-execute"
+reason = "inert install-surface fixture using the reserved .invalid TLD"

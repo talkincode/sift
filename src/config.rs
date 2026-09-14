@@ -150,6 +150,10 @@ pub enum CliCommand {
     EvalCorpus(EvalCorpusCli),
     /// Query dehydrated scan evidence with regex filters; stateless, no model calls
     Query(QueryCli),
+    /// List install-time capabilities (network/execute/fs-write/...) with file:line evidence
+    Surface(SurfaceCli),
+    /// Compare the install surface of two trees or versions
+    Diff(DiffCli),
 }
 
 #[derive(Debug, Args)]
@@ -197,6 +201,76 @@ pub struct QueryCli {
     /// Maximum evidence lines to emit; 0 means unlimited
     #[arg(long, default_value_t = 200)]
     pub limit: usize,
+
+    /// Per-file byte limit; larger files are skipped
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+
+    /// Print extra diagnostic progress to stderr
+    #[arg(long)]
+    pub debug: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SurfaceCli {
+    /// Project root to inspect
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// Inspect only this submodule path inside the project root
+    #[arg(long)]
+    pub module: Option<PathBuf>,
+
+    /// Output format
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+
+    /// Only report these capabilities (comma separated); default reports all
+    #[arg(long, value_delimiter = ',')]
+    pub capability: Vec<String>,
+
+    /// Only report these path scopes (comma separated: production,ci,test,fixture,docs,all);
+    /// defaults to production,ci
+    #[arg(long, value_delimiter = ',', default_value = "production,ci")]
+    pub scope: Vec<String>,
+
+    /// Exit 1 when any of these capabilities is present (comma separated)
+    #[arg(long, value_delimiter = ',')]
+    pub fail_on: Vec<String>,
+
+    /// Maximum entries to emit; 0 means unlimited
+    #[arg(long, default_value_t = 200)]
+    pub limit: usize,
+
+    /// Per-file byte limit; larger files are skipped
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+
+    /// Print extra diagnostic progress to stderr
+    #[arg(long)]
+    pub debug: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DiffCli {
+    /// Baseline tree
+    pub a: PathBuf,
+
+    /// Changed tree
+    pub b: PathBuf,
+
+    /// Output format
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+
+    /// Only compare these capabilities (comma separated); default compares all
+    #[arg(long, value_delimiter = ',')]
+    pub capability: Vec<String>,
+
+    /// Only compare these path scopes (comma separated: production,ci,test,fixture,docs,all);
+    /// defaults to production,ci
+    #[arg(long, value_delimiter = ',', default_value = "production,ci")]
+    pub scope: Vec<String>,
 
     /// Per-file byte limit; larger files are skipped
     #[arg(long)]
@@ -486,6 +560,58 @@ impl Config {
             policy: load_policy_config(&project_root.join("sift-policy.toml"))?,
             models: file.models,
             env_file,
+        })
+    }
+
+    /// Reader-only config for `surface`/`diff`: pure readers of the target
+    /// tree. Unlike `resolve`, it never reads the target's `.env` or
+    /// `sift-policy.toml` and never resolves model keys, so a scanned tree
+    /// cannot influence what the ledger reports.
+    pub fn for_reader(target: PathBuf, module: Option<PathBuf>, max_bytes: u64) -> Result<Self> {
+        let project_root = target
+            .canonicalize()
+            .map_err(|e| anyhow!("cannot locate audit root {}: {e}", target.display()))?;
+        let root_candidate = match &module {
+            Some(m) => project_root.join(m),
+            None => project_root.clone(),
+        };
+        let root = root_candidate
+            .canonicalize()
+            .map_err(|e| anyhow!("cannot locate audit root {}: {e}", root_candidate.display()))?;
+        if module.is_some() && !root.starts_with(&project_root) {
+            return Err(anyhow!(
+                "module path {} is outside project root {}",
+                root.display(),
+                project_root.display()
+            ));
+        }
+        Ok(Self {
+            root,
+            api_key: None,
+            concurrency: default_concurrency(),
+            max_bytes,
+            ignores: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+            scan_only: true,
+            agent_gate: false,
+            format: OutputFormat::Text,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: 0,
+            endpoint: String::new(),
+            model: String::new(),
+            small_endpoint: String::new(),
+            small_model: String::new(),
+            timeout_ms: 60_000,
+            max_retries: 1,
+            report_language: ReportLanguage::En,
+            debug: false,
+            save: false,
+            save_to: None,
+            policy: Policy::default(),
+            models: Vec::new(),
+            env_file: BTreeMap::new(),
         })
     }
 

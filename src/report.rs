@@ -42,7 +42,7 @@ pub enum PathScope {
 }
 
 impl PathScope {
-    fn classify(path: &str) -> PathScope {
+    pub(crate) fn classify(path: &str) -> PathScope {
         let lower = path.replace('\\', "/").to_ascii_lowercase();
         if lower.contains("tests/fixtures/")
             || lower.contains("test/fixtures/")
@@ -92,7 +92,7 @@ impl PathScope {
         severity.max(max_allowed)
     }
 
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             PathScope::Production => "production",
             PathScope::Ci => "ci",
@@ -1090,7 +1090,7 @@ fn looks_like_python_setup_command(text: &str) -> bool {
         || lower.contains("subprocess::")
 }
 
-fn looks_like_download_execute(text: &str) -> bool {
+pub(crate) fn looks_like_download_execute(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let downloads = lower.contains("curl") || lower.contains("wget");
     downloads
@@ -1105,7 +1105,7 @@ fn looks_like_download_execute(text: &str) -> bool {
             || lower.contains("; ./"))
 }
 
-fn looks_like_home_or_ssh_write(text: &str) -> bool {
+pub(crate) fn looks_like_home_or_ssh_write(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let home_or_ssh = lower.contains("~/.ssh")
         || lower.contains("$home/.ssh")
@@ -1121,7 +1121,7 @@ fn looks_like_home_or_ssh_write(text: &str) -> bool {
     home_or_ssh && write_op
 }
 
-fn looks_like_base64_execute(text: &str) -> bool {
+pub(crate) fn looks_like_base64_execute(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("base64")
         && (lower.contains("-d") || lower.contains("--decode"))
@@ -1134,7 +1134,7 @@ fn looks_like_base64_execute(text: &str) -> bool {
             || lower.contains("eval"))
 }
 
-fn looks_like_dynamic_shell_eval(text: &str) -> bool {
+pub(crate) fn looks_like_dynamic_shell_eval(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     looks_like_eval_invocation(&lower) || lower.contains("eval(") || lower.contains("bash -c")
 }

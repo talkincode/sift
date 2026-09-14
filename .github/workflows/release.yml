@@ -9,6 +9,12 @@ on:
 # Least privilege by default; jobs opt into exactly what they need.
 permissions: {}
 
+# Tag pushes are serialized: a tap commit must not interleave with another
+# release run for the same ref.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   guard:
     name: Validate release tag
@@ -16,6 +22,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
       - name: Reject non-SemVer tags
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -27,6 +36,23 @@ jobs:
             exit 1
           fi
           echo "release tag ${REF_NAME} accepted"
+
+      - name: Require the tag to match Cargo.toml
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The Homebrew formula takes its version from the tag while `sift
+          # --version` reports the Cargo.toml version, so a mismatch would ship
+          # a formula whose `brew test` fails.
+          tag_version="${REF_NAME#v}"
+          manifest_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [ -n "$manifest_version" ] || { echo "cannot read version from Cargo.toml" >&2; exit 1; }
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "tag ${REF_NAME} does not match Cargo.toml version ${manifest_version}" >&2
+            exit 1
+          fi
+          echo "tag ${REF_NAME} matches Cargo.toml version ${manifest_version}"
 
   build:
     name: Build ${{ matrix.asset }}
@@ -124,8 +150,16 @@ jobs:
       contents: read
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      HOMEBREW_TAP_REPO: jamiesun/homebrew-tap
+      # Fork-friendly publishing: override these repository variables instead of
+      # editing this workflow. Defaults target the talkincode tap.
+      HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'talkincode/homebrew-tap' }}
+      HOMEBREW_LICENSE: ${{ vars.HOMEBREW_LICENSE || ':cannot_represent' }}
     steps:
+      - name: Note skipped tap update
+        if: ${{ env.HOMEBREW_TAP_TOKEN == '' }}
+        run: |
+          echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping the ${HOMEBREW_TAP_REPO} formula update"
+
       - name: Check out Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -140,14 +174,17 @@ jobs:
         with:
           path: dist-artifacts
 
-      - name: Render and push formula
+      - name: Render formula
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"
           VERSION="${TAG#v}"
-          base="https://github.com/jamiesun/sift/releases/download/${TAG}"
+          # Release assets and homepage follow the repository that runs this
+          # workflow, so a fork publishes a formula that points at itself.
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          homepage="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
 
           sha() {
             local f
@@ -166,9 +203,10 @@ jobs:
           cat > tap/Formula/sift.rb <<EOF
           class Sift < Formula
             desc "Cost-controlled open-source project auditor"
-            homepage "https://github.com/jamiesun/sift"
+            homepage "${homepage}"
             version "${VERSION}"
-            license :cannot_represent
+            license ${HOMEBREW_LICENSE}
+            depends_on :macos
 
             on_macos do
               if Hardware::CPU.arm?
@@ -190,13 +228,25 @@ jobs:
           end
           EOF
 
+          # The YAML block scalar already strips this block's indentation, so
+          # the heredoc body reaches the formula at column 0; validate before
+          # the token-bearing push step runs.
+          command -v ruby >/dev/null || { echo "ruby is required to validate the formula" >&2; exit 1; }
+          ruby -c tap/Formula/sift.rb
+          grep -q '^class Sift < Formula$' tap/Formula/sift.rb
+
+      - name: Commit and push formula
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/sift.rb
           if git diff --cached --quiet; then
-            echo "Formula already up to date for ${VERSION}"
+            echo "Formula already up to date for ${GITHUB_REF_NAME#v}"
           else
-            git commit -m "sift ${VERSION}"
+            git commit -m "sift ${GITHUB_REF_NAME#v}"
             git push
           fi

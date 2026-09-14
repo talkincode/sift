@@ -208,4 +208,7 @@ make docs
 ## License
 
 MIT — see [LICENSE](LICENSE). The Homebrew formula carries the same license,
-taken from the `HOMEBREW_LICENSE` repository variable at release time.
+taken from the `HOMEBREW_LICENSE` repository variable at release time: an SPDX
+id is rendered as a string (`MIT` becomes `license "MIT"`), and a value that
+starts with `:` is passed through as a symbol (the default
+`:cannot_represent`).

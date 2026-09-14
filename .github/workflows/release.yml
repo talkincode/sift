@@ -196,6 +196,16 @@ jobs:
           ARM_SHA="$(sha "sift-${TAG}-macos-arm64.tar.xz")"
           AMD_SHA="$(sha "sift-${TAG}-macos-amd64.tar.xz")"
 
+          # Homebrew wants `license "MIT"` (SPDX string) or `license :mit`
+          # (symbol). The variable carries the bare value, so quote anything
+          # that is not already a symbol literal: an unquoted `license MIT` is
+          # valid Ruby syntax but raises NameError when Homebrew loads it, which
+          # `ruby -c` cannot catch.
+          case "${HOMEBREW_LICENSE}" in
+            :*) LICENSE_LITERAL="${HOMEBREW_LICENSE}" ;;
+            *)  LICENSE_LITERAL="\"${HOMEBREW_LICENSE}\"" ;;
+          esac
+
           # Tap repo is already checked out at ./tap with persisted credentials,
           # so the token never appears in a git remote URL or process arguments.
           mkdir -p tap/Formula
@@ -205,7 +215,7 @@ jobs:
             desc "Cost-controlled open-source project auditor"
             homepage "${homepage}"
             version "${VERSION}"
-            license ${HOMEBREW_LICENSE}
+            license ${LICENSE_LITERAL}
             depends_on :macos
 
             on_macos do
@@ -234,6 +244,18 @@ jobs:
           command -v ruby >/dev/null || { echo "ruby is required to validate the formula" >&2; exit 1; }
           ruby -c tap/Formula/sift.rb
           grep -q '^class Sift < Formula$' tap/Formula/sift.rb
+          # `ruby -c` only proves the file parses; the license literal must also
+          # be well formed, because a bare constant parses and then fails.
+          grep -Eq '^  license (:[a-z_]+|"[^"]+")$' tap/Formula/sift.rb
+          # Evaluate the license line in isolation so a bad literal fails here
+          # instead of in `brew install`.
+          ruby -e '
+            line = File.readlines("tap/Formula/sift.rb").find { |l| l.start_with?("  license ") }
+            abort "license line missing" unless line
+            value = eval(line.sub("  license ", "").strip, binding, "formula-license")
+            abort "license must be a String or Symbol" unless value.is_a?(String) || value.is_a?(Symbol)
+            puts "license literal ok: #{value.inspect}"
+          '
 
       - name: Commit and push formula
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}

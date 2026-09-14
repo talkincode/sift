@@ -172,4 +172,4 @@ brew install talkincode/tap/sift
 
 ## 许可证
 
-MIT，见 [LICENSE](../LICENSE)。Homebrew formula 使用同一许可证，发布时取自仓库变量 `HOMEBREW_LICENSE`。
+MIT，见 [LICENSE](../LICENSE)。Homebrew formula 使用同一许可证，发布时取自仓库变量 `HOMEBREW_LICENSE`：SPDX id 会渲染为字符串（`MIT` → `license "MIT"`），以 `:` 开头的值按符号原样透传（默认值为 `:cannot_represent`）。

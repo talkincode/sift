@@ -204,3 +204,8 @@ Build the bilingual mdBook site locally:
 ```sh
 make docs
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE). The Homebrew formula carries the same license,
+taken from the `HOMEBREW_LICENSE` repository variable at release time.

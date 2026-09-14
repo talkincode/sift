@@ -169,3 +169,7 @@ brew install talkincode/tap/sift
 ```
 
 状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（工具协议、编译期技能、retry→半成品）已完成。P4 进行中：本地 AST 风险账本、Markdown 渲染、`[[model]]` 配置解析、稳定 JSON 门禁、policy、artifact inventory 与 eval corpus 已接线。内部发布门禁会为维护者在 `reports/` 下写入本地报告。
+
+## 许可证
+
+MIT，见 [LICENSE](../LICENSE)。Homebrew formula 使用同一许可证，发布时取自仓库变量 `HOMEBREW_LICENSE`。

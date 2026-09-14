@@ -2,6 +2,8 @@
 name = "sift"
 version = "0.4.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/talkincode/sift"
 
 [dependencies]
 anyhow = "1.0.103"

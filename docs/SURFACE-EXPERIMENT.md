@@ -167,12 +167,40 @@ other three are structural fixes, not tuning.
 
 ## Reproduce
 
-```sh
-# corpus + replays (downloads only, never executes package code)
-/tmp/sift-lab/harness.sh
-/tmp/sift-lab/run_surfaces.sh
+The harness ran outside the repository and is not checked in, so these are the
+steps it performed:
 
-# single package
-sift surface ./pkg --capability network,execute --fail-on execute
-sift diff ./pkg-1.2.3 ./pkg-1.4.0 --format json
+```sh
+# 1. corpus: download published archives and extract them read-only.
+#    Reject absolute and ".." entries before extracting, never run a package
+#    manager, a build, or any package code.
+for spec in express/4.18.2 lodash/4.17.21 axios/1.6.0 react/18.2.0 \
+            typescript/5.3.3 esbuild/0.19.11 sharp/0.33.0 ...; do
+  name=${spec%%/*}; ver=${spec##*/}
+  curl -fsSL "https://registry.npmjs.org/$name/-/$name-$ver.tgz" -o pkg.tgz
+  tar -tzf pkg.tgz | grep -Eq '(^/|(^|/)\.\./)' && exit 1
+  mkdir -p "corpus/npm-$name-$ver" && tar -xzf pkg.tgz -C "corpus/npm-$name-$ver"
+done
+# PyPI: take the sdist URL from https://pypi.org/pypi/<name>/<version>/json
+
+# 2. real malicious artifacts (optional): samples come from the public
+#    DataDog malicious-software-packages-dataset as ZIPs passworded "infected";
+#    extract with `unzip -P infected` and never execute anything.
+
+# 3. ledger and diff per package
+sift surface ./corpus/npm-express-4.18.2 --format json > out/express.json
+sift diff ./corpus/npm-express-4.18.1 ./corpus/npm-express-4.18.2 --format json
+```
+
+Cross-check the two claims the experiment rests on:
+
+```sh
+# hook recall: does every declared npm lifecycle key appear as a hook entry?
+python3 -c "import json;print([k for k in json.load(open('corpus/npm-esbuild-0.19.11/package/package.json'))['scripts']])"
+sift surface ./corpus/npm-esbuild-0.19.11 --capability hook
+
+# shape signal: an obfuscated file must be reported as an artifact, and a
+# routine patch release must stay silent
+sift surface ./corpus/npm-debug-4.4.2 --format json | grep obfuscated_source
+sift diff ./corpus/npm-express-4.18.1 ./corpus/npm-express-4.18.2; echo "exit=$? (0 expected)"
 ```

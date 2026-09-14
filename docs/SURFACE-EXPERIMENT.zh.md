@@ -149,12 +149,37 @@
 
 ## 复现
 
-```sh
-# 语料 + 复现（只下载，绝不执行包代码）
-/tmp/sift-lab/harness.sh
-/tmp/sift-lab/run_surfaces.sh
+实验脚本在仓库之外运行，未入库，因此这里给出它实际执行的步骤：
 
-# 单个包
-sift surface ./pkg --capability network,execute --fail-on execute
-sift diff ./pkg-1.2.3 ./pkg-1.4.0 --format json
+```sh
+# 1. 语料：下载已发布的归档并只读解包。
+#    解包前拒绝绝对路径与 ".." 条目；绝不运行包管理器、构建或任何包代码。
+for spec in express/4.18.2 lodash/4.17.21 axios/1.6.0 react/18.2.0 \
+            typescript/5.3.3 esbuild/0.19.11 sharp/0.33.0 ...; do
+  name=${spec%%/*}; ver=${spec##*/}
+  curl -fsSL "https://registry.npmjs.org/$name/-/$name-$ver.tgz" -o pkg.tgz
+  tar -tzf pkg.tgz | grep -Eq '(^/|(^|/)\.\./)' && exit 1
+  mkdir -p "corpus/npm-$name-$ver" && tar -xzf pkg.tgz -C "corpus/npm-$name-$ver"
+done
+# PyPI：从 https://pypi.org/pypi/<name>/<version>/json 取 sdist URL
+
+# 2. 真实恶意样本（可选）：来自公开的 DataDog
+#    malicious-software-packages-dataset，以密码 "infected" 的 ZIP 分发；
+#    用 `unzip -P infected` 解包，绝不执行任何内容。
+
+# 3. 逐包生成账本与 diff
+sift surface ./corpus/npm-express-4.18.2 --format json > out/express.json
+sift diff ./corpus/npm-express-4.18.1 ./corpus/npm-express-4.18.2 --format json
+```
+
+复核实验所依赖的两个结论：
+
+```sh
+# 钩子召回：package.json 声明的每个生命周期键是否都成为 hook 记录？
+python3 -c "import json;print([k for k in json.load(open('corpus/npm-esbuild-0.19.11/package/package.json'))['scripts']])"
+sift surface ./corpus/npm-esbuild-0.19.11 --capability hook
+
+# 形态信号：被混淆的文件必须报为 artifact，而常规补丁发布必须保持安静
+sift surface ./corpus/npm-debug-4.4.2 --format json | grep obfuscated_source
+sift diff ./corpus/npm-express-4.18.1 ./corpus/npm-express-4.18.2; echo "exit=$? (期望 0)"
 ```

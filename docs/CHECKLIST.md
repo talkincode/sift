@@ -189,13 +189,13 @@ ROADMAP status: no checkmark in the heading; substantial evidence exists.
 | 3 | F | Git hooks install/uninstall; pre-commit runs `make local-ci` | ✅ Done | `Makefile` `githooks-install`/`githooks-uninstall`; `.githooks/pre-commit` |
 | 4 | F | CI: fmt/test/clippy/internal-gate on an `ubuntu-latest` + `macos-latest` matrix | ✅ Done | `.github/workflows/ci.yml` |
 | 5 | F | Release workflow: SemVer tag guard, macOS amd64/arm64 build, `tar.xz` + `sha256`, environment-gated draft→published GitHub release | ✅ Done | `.github/workflows/release.yml`; tags `v0.1.0`, `v0.2.0` exist |
-| 6 | F | Homebrew tap auto-publish (`jamiesun/homebrew-tap` formula render + push) | ✅ Done | `release.yml::homebrew` job; depends on the `HOMEBREW_TAP_TOKEN` repo secret being configured, which is outside this repo's own verifiable scope |
+| 6 | F | Homebrew tap auto-publish (`talkincode/homebrew-tap` formula render + push) | ✅ Done | `release.yml::homebrew` job (tap target and license are `HOMEBREW_TAP_REPO` / `HOMEBREW_LICENSE` repository variables, defaulting to the talkincode tap); depends on the `HOMEBREW_TAP_TOKEN` repo secret being configured, which is outside this repo's own verifiable scope |
 | 7 | F | More grammars | ⏳ Pending (open-ended) | 23 tree-sitter grammars + 4 structural extractors already shipped (see P1); ROADMAP intentionally leaves this unbounded, so it can never be marked fully "done" |
 | 8 | F | Stable JSON output contracts (`schema_version`) across `--benchmark`, `--agent-gate --format json`, `eval-corpus` | ✅ Done | `schema_version: 1` asserted in `benchmark_mode_outputs_stable_json_without_model_keys`, `agent_gate_json_exposes_stable_verdict_shape` |
 | 9 | G | Single-file dist | ✅ Done | `release.yml` packages one `sift` binary (+ docs/README/config template) per `tar.xz` |
 | 10 | G | Internal gates pass | ✅ Done | See P5 |
 | 11 | G | Docs ↔ code consistent | 🟡 Partial (manual only) | No automated check diffs documentation (supported-language lists, CLI flags, version strings) against source of truth; verified by manual cross-reading this session, but **nothing in `make ci` would catch future drift** |
-| 12 | G | `brew install jamiesun/tap/sift` backed by release checksums | ✅ Done (unverified externally) | `sha256`/formula-render logic present in `release.yml`; not independently re-checked against the live `jamiesun/homebrew-tap` repository in this session |
+| 12 | G | `brew install talkincode/tap/sift` backed by release checksums | ✅ Done (unverified externally) | `sha256`/formula-render logic present in `release.yml` (now with `ruby -c` validation before the token-bearing push); not independently re-checked against the live `talkincode/homebrew-tap` repository in this session |
 
 **Phase verdict: 🟡 Mostly done.** Two open threads: docs↔code consistency has no automated guard, and "more grammars" is an intentionally unbounded target rather than a gate to close.
 

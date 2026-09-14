@@ -185,13 +185,13 @@ ROADMAP 状态：标题未标 ✓，但已有相当充分的证据。
 | 3 | F | Git hooks 安装/卸载；pre-commit 跑 `make local-ci` | ✅ 完成 | `Makefile` 的 `githooks-install`/`githooks-uninstall`；`.githooks/pre-commit` |
 | 4 | F | CI：在 `ubuntu-latest` + `macos-latest` 矩阵上跑 fmt/test/clippy/internal-gate | ✅ 完成 | `.github/workflows/ci.yml` |
 | 5 | F | Release workflow：SemVer 标签校验、macOS amd64/arm64 构建、`tar.xz` + `sha256`、environment 审批后 draft→published | ✅ 完成 | `.github/workflows/release.yml`；已有标签 `v0.1.0`、`v0.2.0` |
-| 6 | F | Homebrew tap 自动发布（渲染并推送 `jamiesun/homebrew-tap` formula） | ✅ 完成 | `release.yml::homebrew` job；依赖仓库 secret `HOMEBREW_TAP_TOKEN` 是否配置，这一点超出本仓库自身可验证的范围 |
+| 6 | F | Homebrew tap 自动发布（渲染并推送 `talkincode/homebrew-tap` formula） | ✅ 完成 | `release.yml::homebrew` job（目标 tap 与 license 由仓库变量 `HOMEBREW_TAP_REPO` / `HOMEBREW_LICENSE` 控制，默认指向 talkincode 的 tap）；依赖仓库 secret `HOMEBREW_TAP_TOKEN` 是否配置，这一点超出本仓库自身可验证的范围 |
 | 7 | F | 更多语法 | ⏳ 待定（开放式） | 已交付 23 种 tree-sitter 语法 + 4 种结构化提取器（见 P1）；ROADMAP 有意将其保持无上限，因此永远无法标记为「完全完成」 |
 | 8 | F | `--benchmark`、`--agent-gate --format json`、`eval-corpus` 的稳定 JSON 输出契约（`schema_version`） | ✅ 完成 | `benchmark_mode_outputs_stable_json_without_model_keys`、`agent_gate_json_exposes_stable_verdict_shape` 均断言 `schema_version: 1` |
 | 9 | G | 单文件分发 | ✅ 完成 | `release.yml` 把单个 `sift` 二进制（+ docs/README/config 模板）打进一个 `tar.xz` |
 | 10 | G | 内部门禁通过 | ✅ 完成 | 见 P5 |
 | 11 | G | 文档 ↔ 功能一致 | 🟡 部分完成（仅人工） | 没有任何自动化检查会把文档（支持语言列表、CLI flag、版本号）与源码事实来源做 diff；本次会话通过人工交叉阅读验证，但**`make ci` 无法捕捉未来的漂移** |
-| 12 | G | `brew install jamiesun/tap/sift` 由 release checksum 支撑 | ✅ 完成（未做外部复核） | `release.yml` 中已有 `sha256`/formula 渲染逻辑；本次会话未对真实的 `jamiesun/homebrew-tap` 仓库做独立复核 |
+| 12 | G | `brew install talkincode/tap/sift` 由 release checksum 支撑 | ✅ 完成（未做外部复核） | `release.yml` 中已有 `sha256`/formula 渲染逻辑（推送前新增 `ruby -c` 校验）；本次会话未对真实的 `talkincode/homebrew-tap` 仓库做独立复核 |
 
 **阶段结论：🟡 基本完成。** 两条悬而未决的线：文档↔代码一致性没有自动化守卫；「更多语法」是有意保持无上限的目标，而不是一个可以关闭的门禁。
 

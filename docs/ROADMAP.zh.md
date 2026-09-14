@@ -66,6 +66,8 @@ src/config.rs     降级寻址、多模型配置加载            [P0✓→P2扩
 src/scanner.rs    Walk + 有界 channel                  [P0✓]
 src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
 src/query.rs      无状态证据检索(重扫+regex过滤)        [P1✓]
+src/surface.rs    安装面能力账本                        [P7✓]
+src/diff.rs       两棵树的安装面差异                    [P7✓]
 src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2✓]
 src/react.rs      ReACT 状态机 + 技能 enum/match        [P3 ✓]
 src/skills.rs     本地技能函数(粗筛/reduce收敛)         [P3 ✓→P4]
@@ -144,7 +146,7 @@ max_retries = 1
 
 ### P6 发布加固
 - 功能：ReleaseSafe 单二进制、Makefile 安装路径、macOS Homebrew tap 发布、多语法扩展、JSON 输出稳定。
-- 门禁：单文件分发、内部门禁通过、文档↔功能一致，`brew install jamiesun/tap/sift` 由 release checksum 支撑。
+- 门禁：单文件分发、内部门禁通过、文档↔功能一致，`brew install talkincode/tap/sift` 由 release checksum 支撑。
 
 ## 完成的样子
 

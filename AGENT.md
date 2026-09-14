@@ -36,6 +36,8 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 | `src/scanner.rs` | Walk + bounded channel | P0 ✓ |
 | `src/extract.rs` | tree-sitter dehydrate → AstSummary | P1 ✓ |
 | `src/query.rs` | stateless evidence query (rescan + regex filters) | P1 ✓ |
+| `src/surface.rs` | install-surface capability ledger (no model, target config never read) | P7 ✓ |
+| `src/diff.rs` | install-surface diff between two trees | P7 ✓ |
 | `src/model.rs` | model registry/client/timeout/breaker | P2 ✓ |
 | `src/react.rs` | ReACT state machine + skill match | P3 ✓ |
 | `src/skills.rs` | local skill fns (map/reduce) | P3 ✓→P4 |

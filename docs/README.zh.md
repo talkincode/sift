@@ -23,6 +23,10 @@ sift eval-corpus               # 运行内置 repo-intake 精度样本集
 sift query ./repo --calls 'exec|spawn'          # 无状态证据检索 → file:line
 sift query ./repo --imports reqwest --lang rust # 谁引入了 reqwest，仅看 rust 文件
 sift query ./repo --any 'curl|wget' --format json
+sift surface ./repo            # 安装面能力账本（无需 Key）
+sift surface ./repo --capability network,execute --fail-on execute
+sift surface ./repo --format json
+sift diff pkg-1.2.3 pkg-1.4.0  # 安装面新增/移除了什么
 sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
 sift ./repo --api-key-file ~/.sift/key
@@ -62,6 +66,32 @@ regex 旗标过滤证据：`--calls`、`--imports`、`--signatures`、
 `coverage`、匹配计数和 `matches`。输出证据由 `--limit`（默认 200）
 封顶且截断可见。退出码遵循 grep 惯例：`0` 有命中，`1` 无命中，`2`
 用法或配置错误。
+
+`sift surface` 是安装面账本：它回答"这棵树在安装、构建或 CI 阶段
+能做什么"，并给出 `file:line` 证据，但不对严重性下判断。能力类别固定
+且按此顺序输出：`artifact`、`deps`、`execute`、`fs-write`、`hook`、
+`network`、`secret`。每条记录带 `trigger`（能触发它的入口：`postinstall`、
+`ci-run`、`docker-run`、`make`、`python-setup`、`install-script`、`doc`，
+或仅存在于代码中的 `source`/`manifest`）、`confidence`（`strong` 表示
+该行证明了能力，`weak` 表示只表明可达性，例如 import 或 URL 字面量）
+以及作用域（`production`、`ci`、`test`、`fixture`、`docs`）。文本输出
+按能力分组；JSON 额外包含 `schema_version`、计数与覆盖率。`--capability`
+过滤，`--scope` 选择作用域（默认 `production,ci`，被隐藏条目始终计数），
+`--limit` 限制输出条数（默认 200），`--fail-on <能力,...>` 在命中时以
+`1` 退出。退出码：`0` 已生成账本，`1` `--fail-on` 命中，`2` 用法或配置错误。
+与审计路径不同，`surface` 与 `diff` **不读取目标树的 `.env` 或
+`sift-policy.toml`**：账本是被扫描树的纯函数。
+
+`artifact` 能力同时覆盖**形态不可读的源文件**：token 检测器看不见被混淆的
+载荷——载荷是字符串数组加生成标识符，任何能力 token 都不会出现。因此
+`sift surface` 会报告 `obfuscated_source`（strong，生成型 `_0x` 类标识符
+≥ 100）或 `minified_source`（weak，单行 ≥ 20000 字符）并附文件度量，
+这正是让"被混淆的版本升级"在 `sift diff` 中可见的原因。
+
+`sift diff <a> <b>` 把两棵树归约为同一套记录，报告安装面的增删；匹配键为
+`(能力, 路径, 证据文本)`，因此仅行号移动不算变化；若两侧共享同一层包装
+目录（`package/`、`foo-1.2.3/`）会被剥离，便于直接比较两个解包发行版。
+退出码：`0` 无差异，`1` 有差异，`2` 用法或配置错误。
 
 确定性供应链规则目前会标记 npm 安装生命周期脚本、manifest/lockfile
 可复现性缺口、git/path/http 依赖来源、Rust `build.rs` 命令边界、
@@ -128,10 +158,14 @@ pre-commit hook 会在每次提交前运行 `make local-ci`。确需临时跳过
 确定性 `--agent-gate` 回归测试。`sift eval-corpus` 会基于这些 fixture
 输出 release 级别的精度表。这些 fixture 命令只是惰性样例，绝不能当作安装脚本执行。
 
-macOS release 通过已有 tap 安装：
+macOS release 通过 talkincode 的 tap 发布。打 `v*` tag 会触发
+`release.yml`：发布带 checksum 的 `.tar.xz` 资产、渲染该 tap 的
+`Formula/sift.rb`，并用 `HOMEBREW_TAP_TOKEN` secret 推送；仓库变量
+`HOMEBREW_TAP_REPO` 与 `HOMEBREW_LICENSE` 可在不改 workflow 的前提下
+覆盖目标 tap 与 license。
 
 ```sh
-brew install jamiesun/tap/sift
+brew install talkincode/tap/sift
 ```
 
 状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（工具协议、编译期技能、retry→半成品）已完成。P4 进行中：本地 AST 风险账本、Markdown 渲染、`[[model]]` 配置解析、稳定 JSON 门禁、policy、artifact inventory 与 eval corpus 已接线。内部发布门禁会为维护者在 `reports/` 下写入本地报告。

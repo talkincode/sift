@@ -23,6 +23,10 @@ sift eval-corpus               # run the checked-in repo-intake precision corpus
 sift query ./repo --calls 'exec|spawn'          # stateless evidence query → file:line
 sift query ./repo --imports reqwest --lang rust # who imports reqwest, rust files only
 sift query ./repo --any 'curl|wget' --format json
+sift surface ./repo            # install-time capability ledger (no key needed)
+sift surface ./repo --capability network,execute --fail-on execute
+sift surface ./repo --format json
+sift diff pkg-1.2.3 pkg-1.4.0  # what the install surface gained or lost
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
@@ -63,6 +67,38 @@ emits one document with `schema_version`, the echoed `query`, `coverage`,
 match counts, and `matches`. Emitted evidence is capped by `--limit`
 (default 200) with visible truncation. Exit codes follow grep: `0` matched,
 `1` no matches, `2` usage or configuration errors.
+
+`sift surface` is the install-surface ledger: it answers *what can this tree do
+at install, build, or CI time* with `file:line` evidence, without judging
+severity. Capabilities are fixed and emitted in this order: `artifact`, `deps`,
+`execute`, `fs-write`, `hook`, `network`, `secret`. Each entry carries a
+`trigger` (the entry point that can run it: `postinstall`, `ci-run`,
+`docker-run`, `make`, `python-setup`, `install-script`, `doc`, or
+`source`/`manifest` when it is only reachable from code), a `confidence`
+(`strong` when the line proves the capability, `weak` when it only indicates
+reach, such as an import or a URL literal), and the scope (`production`, `ci`,
+`test`, `fixture`, `docs`). Text output groups entries by capability; JSON adds
+`schema_version`, counts, and coverage. `--capability` filters, `--scope`
+selects path scopes (default `production,ci`, hidden entries always counted),
+`--limit` caps emission (default 200), and `--fail-on <capability,...>` exits
+`1` when a capability is present. Exit codes: `0` ledger produced, `1`
+`--fail-on` matched, `2` usage or configuration error. Unlike the audit path,
+`surface` and `diff` never read the target's `.env` or `sift-policy.toml`: the
+ledger is a pure function of the tree.
+
+The `artifact` capability also covers **source files whose shape is opaque**:
+token detectors cannot see an obfuscated payload, because the payload is a
+string array plus generated identifiers and no capability token ever appears.
+`sift surface` therefore reports `obfuscated_source` (strong, ≥ 100 generated
+`_0x`-style identifiers) or `minified_source` (weak, a generated line of
+20 000+ characters) with the file's metrics, which is what makes an obfuscated
+version bump visible to `sift diff`.
+
+`sift diff <a> <b>` reduces two trees to the same entries and reports what the
+install surface gained or lost, keyed on `(capability, path, evidence text)` so
+line moves are not changes; a shared wrapper directory (`package/`,
+`foo-1.2.3/`) is stripped so two extracted distributions compare directly.
+Exit codes: `0` identical, `1` changed, `2` usage or configuration error.
 
 The deterministic supply-chain layer currently flags npm install lifecycle
 scripts, manifest/lockfile reproducibility gaps, git/path/http dependency
@@ -144,10 +180,14 @@ eval-corpus` emits the release-oriented precision table over those fixtures.
 The fixture commands are inert examples and must never be executed as install
 scripts.
 
-macOS releases are published through the existing tap:
+macOS releases are published through the talkincode tap. Tagging `v*` runs
+`release.yml`, which publishes the `.tar.xz` assets with checksums, renders
+`Formula/sift.rb` for that tap, and pushes it with the `HOMEBREW_TAP_TOKEN`
+secret; `HOMEBREW_TAP_REPO` and `HOMEBREW_LICENSE` repository variables
+override the tap target without editing the workflow.
 
 ```sh
-brew install jamiesun/tap/sift
+brew install talkincode/tap/sift
 ```
 
 ## Status

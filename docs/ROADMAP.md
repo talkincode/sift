@@ -66,6 +66,8 @@ src/config.rs     fallback resolve, multi-model config         [P0✓→P2]
 src/scanner.rs    Walk + bounded channel                       [P0✓]
 src/extract.rs    tree-sitter dehydrate → AstSummary           [P1✓]
 src/query.rs      stateless evidence query (rescan + regex)    [P1✓]
+src/surface.rs    install-surface capability ledger            [P7✓]
+src/diff.rs       install-surface diff between two trees       [P7✓]
 src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3 ✓]
 src/skills.rs     local skill fns (coarse filter / reduce)     [P3 ✓→P4]
@@ -132,7 +134,7 @@ Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` T
 Features: audit.rs scores trimmed dimensions and writes maintainer-only reports to `reports/` (gitignored). Gate: no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.
 
 ### P6 Release hardening
-Features: ReleaseSafe single binary, Makefile install path, macOS Homebrew tap publishing, more grammars, stable JSON. Gate: single-file dist, internal gates pass, docs↔code consistent, `brew install jamiesun/tap/sift` backed by release checksums.
+Features: ReleaseSafe single binary, Makefile install path, macOS Homebrew tap publishing, more grammars, stable JSON. Gate: single-file dist, internal gates pass, docs↔code consistent, `brew install talkincode/tap/sift` backed by release checksums.
 
 ## Definition of done
 

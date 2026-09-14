@@ -36,6 +36,8 @@
 | `src/scanner.rs` | Walk + 有界通道 | P0 ✓ |
 | `src/extract.rs` | tree-sitter 脱水 → AstSummary | P1 ✓ |
 | `src/query.rs` | 无状态证据检索（重扫 + regex 过滤） | P1 ✓ |
+| `src/surface.rs` | 安装面能力账本（不调模型、不读目标配置） | P7 ✓ |
+| `src/diff.rs` | 两棵树的安装面差异 | P7 ✓ |
 | `src/model.rs` | 模型注册表/客户端/超时/熔断 | P2 ✓ |
 | `src/react.rs` | ReACT 状态机 + 技能 match | P3 ✓ |
 | `src/skills.rs` | 本地技能函数(map/reduce) | P3 ✓→P4 |

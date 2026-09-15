@@ -13,11 +13,11 @@
 
 | | |
 |---|---|
-| Commit | `79cad29` — "perf(memory): report peak RSS on macOS, and stop sizing payloads by building them (#3)", plus this session's doctor/missing-key test work (`tests/doctor.rs`, `tests/missing_key.rs`) |
+| Commit | `a3e53e3` — "test: cover doctor, the missing-key gate, and the gate check's own scoping (#4)", plus this session's scan I/O change (`src/main.rs`, `src/extract.rs`) |
 | Date assessed | 2026-09-15 — build, tests, gate, the P0/P1 scan rows, and the P4a/P4c rows for Reduce, `doctor`, and the missing-key gate were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
 | `cargo build` | ✅ pass |
 | `make ci` (`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`) | ✅ pass, exit 0 |
-| Tests | ✅ 194 passed, 0 failed (154 unit tests in `src/**` + 40 black-box tests in `tests/*.rs`) |
+| Tests | ✅ 196 passed, 0 failed (156 unit tests in `src/**` + 40 black-box tests in `tests/*.rs`) |
 | Internal quality gate (`reports/internal-gate.md`) | ✅ 14/14 checks PASS, 0 WARN, 0 FAIL |
 
 ## Legend
@@ -64,6 +64,7 @@ ROADMAP status: **done ✓**
 | 3 | F | Extract signatures/imports/calls into a flat `AstSummary` JSON record | ✅ Done | `struct AstSummary`, `fn dehydrate` |
 | 4 | F | Cross-boundary references marked `[EXTERNAL_BLACKBOX]` | ✅ Done | `fn is_external`; test `intra_crate_rust_imports_are_not_external` confirms it does **not** over-flag `crate::`/`super::` |
 | 5 | B | Bodies/comments omitted; AST dropped immediately after dehydration (never retained) | ✅ Done | By construction: `dehydrate()` returns only the flat summary; no `tree_sitter::Tree` is stored anywhere in `main.rs` |
+| 9 | B | Resident memory decoupled from tree size; nothing large retained | ✅ Done | Unsupported files are inventoried from metadata without being read (a 1.1 GiB corpus of 3000 assets scans at 15 MiB peak instead of 17 MiB, and 20% faster), and the line-oriented dehydrators borrow one line at a time instead of copying the whole file through `String::from_utf8_lossy` (`for_each_line`, equivalence-tested against `str::lines`). `tests/memory_scale.rs` pins the flat-footprint contract |
 | 6 | B | Malformed syntax tolerated without panicking | ✅ Done | Test `broken_input_no_panic` |
 | 7 | G | 100 MB repo: stable memory, no crash | 🟡 Partial | The metric gap is closed: `resident_memory_metric` reports peak RSS from procfs on Linux and `getrusage`/`RuMaxrss` on macOS, asserted by `resident_memory_metric_reports_a_peak_where_supported` and by `tests/benchmark_mode.rs` on both CI platforms. The decoupling contract is now a test rather than a claim — `tests/memory_scale.rs` generates a 24 MiB corpus, pins concurrency, and asserts that 6x the files stays under 3x the peak (measured 1.5-1.7x) with an absolute ceiling. Still not a literal 100 MB single corpus |
 | 8 | G | `extract.rs` tests cover typical + broken input | ✅ Done | 17 test functions in `extract.rs::tests`, including malformed-input and unknown-extension cases |

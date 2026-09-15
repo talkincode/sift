@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `79cad29` —「perf(memory): report peak RSS on macOS, and stop sizing payloads by building them (#3)」，外加本次会话的 doctor/缺 Key 测试工作（`tests/doctor.rs`、`tests/missing_key.rs`） |
+| 提交 | `a3e53e3` —「test: cover doctor, the missing-key gate, and the gate check's own scoping (#4)」，外加本次会话的扫描 I/O 改动（`src/main.rs`、`src/extract.rs`） |
 | 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 194 个通过，0 个失败（`src/**` 内 154 个单测 + `tests/*.rs` 内 40 个黑盒测试） |
+| 测试 | ✅ 196 个通过，0 个失败（`src/**` 内 156 个单测 + `tests/*.rs` 内 40 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -60,6 +60,7 @@ ROADMAP 状态：**已完成 ✓**
 | 3 | F | 签名/import/调用提取为扁平 `AstSummary` JSON 记录 | ✅ 完成 | `struct AstSummary`、`fn dehydrate` |
 | 4 | F | 跨界引用标记 `[EXTERNAL_BLACKBOX]` | ✅ 完成 | `fn is_external`；测试 `intra_crate_rust_imports_are_not_external` 确认不会对 `crate::`/`super::` 误标 |
 | 5 | B | 丢弃注释与函数体；脱水后立即 drop AST（从不保留） | ✅ 完成 | 由实现方式保证：`dehydrate()` 只返回扁平摘要；`main.rs` 中任何位置都未保存 `tree_sitter::Tree` |
+| 9 | B | 常驻内存与树规模脱钩；不保留大对象 | ✅ 完成 | 不支持的文件只凭 metadata 记账、不再整份读入（1.1 GiB / 3000 个素材的语料峰值 17 MiB → 15 MiB，且快 20%）；按行扫描的脱水器改为逐行借用，而不是把整份文件过一遍 `String::from_utf8_lossy`（`for_each_line`，并与 `str::lines` 做了等价性测试）。`tests/memory_scale.rs` 固定住这条平坦占用契约 |
 | 6 | B | 残缺语法不 panic | ✅ 完成 | 测试 `broken_input_no_panic` |
 | 7 | G | 百兆仓库：内存稳定、不崩溃 | 🟡 部分完成 | 指标缺口已补上：`resident_memory_metric` 在 Linux 走 procfs、在 macOS 走 `getrusage`/`RuMaxrss` 报告峰值常驻内存，由 `resident_memory_metric_reports_a_peak_where_supported` 与 `tests/benchmark_mode.rs` 在两个 CI 平台上断言。「与规模脱钩」也从口头声明变成了测试——`tests/memory_scale.rs` 运行时生成 24 MiB 语料、固定并发数，断言文件数 6 倍时峰值不超过 3 倍（实测 1.5–1.7 倍），并有绝对上限。但还不是字面上的单份 100 MB 语料 |
 | 8 | G | `extract.rs` 测试覆盖典型输入与残缺输入 | ✅ 完成 | `extract.rs::tests` 内 17 个测试函数，含畸形输入与未知扩展名场景 |

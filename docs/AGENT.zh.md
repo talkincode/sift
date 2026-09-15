@@ -33,7 +33,7 @@
 |------|------|------|
 | `src/main.rs` | 装配：解析→Config→调度→报表→退出码 | P0 ✓ |
 | `src/config.rs` | 降级寻址、多模型配置 | P0 ✓→P2 |
-| `src/scanner.rs` | Walk + 有界通道 | P0 ✓ |
+| `src/scanner.rs` | Walk + 有界通道 + 有序多线程脱水 | P0 ✓→P1 |
 | `src/extract.rs` | tree-sitter 脱水 → AstSummary | P1 ✓ |
 | `src/query.rs` | 无状态证据检索（重扫 + regex 过滤） | P1 ✓ |
 | `src/surface.rs` | 安装面能力账本（不调模型、不读目标配置） | P7 ✓ |

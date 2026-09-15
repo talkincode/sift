@@ -13,11 +13,11 @@
 
 | | |
 |---|---|
-| Commit | `dbd92e2` — "perf(reduce): run independent Reduce batches in parallel, merge in batch order (#2)", plus this session's memory-metric change (`src/main.rs`, `tests/memory_scale.rs`) |
-| Date assessed | 2026-09-15 — build, tests, gate, the P0/P1 scan rows, and the P4a Reduce rows were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
+| Commit | `79cad29` — "perf(memory): report peak RSS on macOS, and stop sizing payloads by building them (#3)", plus this session's doctor/missing-key test work (`tests/doctor.rs`, `tests/missing_key.rs`) |
+| Date assessed | 2026-09-15 — build, tests, gate, the P0/P1 scan rows, and the P4a/P4c rows for Reduce, `doctor`, and the missing-key gate were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
 | `cargo build` | ✅ pass |
 | `make ci` (`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`) | ✅ pass, exit 0 |
-| Tests | ✅ 183 passed, 0 failed (153 unit tests in `src/**` + 30 black-box tests in `tests/*.rs`) |
+| Tests | ✅ 194 passed, 0 failed (154 unit tests in `src/**` + 40 black-box tests in `tests/*.rs`) |
 | Internal quality gate (`reports/internal-gate.md`) | ✅ 14/14 checks PASS, 0 WARN, 0 FAIL |
 
 ## Legend
@@ -47,9 +47,9 @@ ROADMAP status: **done ✓**
 | 4 | G | `cargo build` green | ✅ Done | Verified this session (`make ci` exit 0) |
 | 5 | G | Zero `unwrap()`/`expect()` in `src/` | ✅ Done | `reports/internal-gate.md`: "No direct unwrap/expect in src" — PASS |
 | 6 | G | `--scan-only` scans without any model key | ✅ Done | `tests/benchmark_mode.rs::scan_only_stdout_remains_jsonl_not_benchmark_json` |
-| 7 | G | Missing large-model key exits before scheduling a full audit | 🟡 Partial | Code path exists (`src/main.rs:83-86`, `config::missing_large_key_hint`), unit-tested for message content only (`missing_key_hint_uses_parseable_model_block`); **no black-box test spawns the real binary with no key on a non-`--scan-only`/`--agent-gate`/`--benchmark` path to assert the process exit code** |
+| 7 | G | Missing large-model key exits before scheduling a full audit | ✅ Done | `tests/missing_key.rs::full_audit_without_a_key_exits_one_with_an_injection_hint` spawns the real binary with every key source cleared, asserts exit code 1, the `missing large-model API key` / `SIFT_API_KEY` hint on stderr, empty stdout, and a fail-fast wall clock. The counterpart contract (`scan_only_still_runs_without_any_key`) pins that the deterministic layer never needs a key |
 
-**Phase verdict: ✅ Done**, with one test-coverage gap (#7).
+**Phase verdict: ✅ Done**, with every gate now carrying automated evidence.
 
 ---
 
@@ -153,13 +153,13 @@ ROADMAP status: **not marked done**; README self-reports "in progress." This is 
 |---|---|------|--------|----------|
 | 1 | F | `--benchmark` local telemetry (no model calls; optional USD cost estimate) | ✅ Done | `tests/benchmark_mode.rs` (3/3 passing) |
 | 2 | F | `sift github owner/repo` safe intake — never builds, installs, runs hooks, or touches submodules; inspects file/byte limits, `.gitmodules`, Git LFS before scanning | ✅ Done | `run_github_intake`, `parse_github_repo`, `inspect_checkout_dir`; tests `github_repo_parser_accepts_owner_repo_and_https`, `checkout_inspection_reports_lfs_and_limits`, `github_intake_rejects_non_github_url_without_network` (black-box). Both `git` fetch and the recursive local `sift` invocation run under `run_command_with_timeout` (120s / 600s hard deadlines with kill-on-timeout) |
-| 3 | F | `sift doctor` — config/key/endpoint diagnostics | 🟡 Partial | Implemented (`run_doctor`, `check_config_permissions`, `check_file_config`, `check_endpoint_key_pair`, …) but **has zero automated test coverage** — no unit test in `config.rs::tests` exercises `run_doctor`/`Doctor`, and no integration test in `tests/` spawns `sift doctor`. The internal gate's "each file has `#[cfg(test)]`" check (BT) passes for `config.rs` only because *other* functions in the same file are tested — it cannot see this gap |
+| 3 | F | `sift doctor` — config/key/endpoint diagnostics | ✅ Done | `tests/doctor.rs` runs the real binary against a throwaway `HOME` per case: healthy config (PASS rows incl. `permissions 600`), invalid TOML (FAIL + exit 1), absent config (creates a secret-free default, WARN, exit 0), mode 644 (advisory WARN), local endpoint without a key (PASS, no auth needed), public endpoint without its `key_env` (FAIL + exit 1), Azure-shaped key against `api.openai.com` (FAIL + 401 warning), and a key value that must never appear in stdout or stderr |
 | 4 | F | `--save`/`--save-to` persisted reports (`reports/sift-audit-result-YYYYMMDD-NNN.md`) | ✅ Done | `save_audit_result`, `next_audit_result_path`, `utc_yyyymmdd`, `civil_from_days` in `main.rs` |
 | 5 | F | `--report-language {en,zh}` bilingual Markdown reports | ✅ Done | `ReportLanguage`; test `localized_headings_render_for_zh` |
 | 6 | F | `--debug` extra stderr diagnostics | ✅ Done | `main.rs` debug `eprintln!` blocks |
 | 7 | B | Small-model Map (`map_small_pool`) is retained as inactive diagnostic scaffolding, not called by the default full-audit path | 🟡 Partial (by design) | Code + 4 tests exist in `model.rs` (`small_pool_maps_successful_observations`, etc.), but `main.rs` prints `"small-model Map inactive: reduce converges from deterministic findings"` and never calls it. This matches AGENT.md's framing exactly — it is correctly labeled scaffolding, not a defect — but it is still an **open roadmap decision**: reintroduce behind a behavior-level gate, or retire it |
 
-**Phase verdict: 🟡 Mostly done — matches the project's own "P4 in progress" self-report.** The remaining open engineering item is #3 in P4c (`doctor` untested); the small-model Map question (#7 in P4c) is an intentional open decision, not a bug. P4a #10 (CI-automated full-audit smoke) was closed this session.
+**Phase verdict: 🟡 Mostly done — matches the project's own "P4 in progress" self-report.** Every P4 item now has evidence except the small-model Map question (#7 in P4c), which is an intentional open decision rather than a defect.
 
 ---
 
@@ -303,10 +303,8 @@ Everything not marked ✅ Done above, in one place. Items already resolved in ea
 
 | Item | Phase | Status | Suggested next step |
 |------|-------|--------|----------------------|
-| No black-box test asserts exit code 1 for a real full-audit run with no key | P0 | 🟡 Partial | Add an integration test under `tests/` |
 | The memory-scale proof tops out at a generated ~24 MiB corpus, not a literal 100 MB run | P1 | 🟡 Partial | Optionally raise the corpus in `tests/memory_scale.rs`; the decoupling contract itself is already asserted |
 | The pre-existing policy-suppression logic (`apply_policy`/`policy_match`/`policy_override_match` for `RiskFinding`s) has no direct unit test exercising suppression end-to-end — only TOML parsing is tested (`parses_policy_schema_and_rejects_bad_severity`). The new artifact-allowlist path added this session is tested; the original finding-allowlist path still is not | P4b | 🟡 Partial | Add `apply_policy`/denylist/severity-override unit tests in `report.rs`, mirroring the new `policy_allowlist_*` artifact tests |
-| `sift doctor` has zero automated test coverage | P4c | 🟡 Partial | Add unit tests for `Doctor`/`run_doctor` and/or a `tests/doctor.rs` black-box test |
 | Small-model Map is inactive scaffolding; reintroduce-or-retire decision is still open | P4c | 🟡 Partial (by design) | Maintainer decision, then either wire behind a behavior-level gate or delete |
 | "More grammars" has no fixed target | P6 | ⏳ Pending | Not a defect; track via issues per language request instead of this checklist |
 | Docs ↔ code consistency has no automated guard | P6 | 🟡 Partial | Consider an `audit.rs` check that greps `README.md`'s supported-language list against `extract.rs::Lang` variants |

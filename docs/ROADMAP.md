@@ -24,7 +24,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
   Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2 ✓]
         ▼
   ReACT scheduler (tool protocol, deterministic findings, retry≤N)   [P3 ✓]
-        │  └─ large model (Reduce convergence) ─────────┘
+        │  └─ large model, parallel Reduce batches in batch order (≤8) ─┘
         ▼
   Report    stdout Markdown risk list (line/call-chain)            [P4 started]
         ▼
@@ -36,7 +36,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - **Zero-friction cold start.** `sift ./repo --scan-only` just runs; missing `~/.sift/config.toml` is created with non-secret defaults; no interactive prompts; exits with an injection hint if the key is missing.
 - **Cost-controlled & budgetable.** The deterministic baseline is local; the large model only sees the dehydrated skeleton when full audit is requested.
 - **Model orchestration.** A ReACT state machine chains deterministic findings and large-model convergence; skills are compile-time local functions.
-- **Multi-model + concurrency.** Multiple endpoints are configurable; the scan fans per-file dehydration out over `concurrency` workers and consumes the results in walk order, so streams and reports stay byte-stable; scan/model concurrency remains bounded and observable.
+- **Multi-model + concurrency.** Multiple endpoints are configurable; the scan fans per-file dehydration out over `concurrency` workers and consumes the results in walk order, and the independent Reduce batches overlap over that same cap (model side capped at 8). Both stages merge in index order, so streams and reports stay byte-stable; scan/model concurrency remains bounded and observable.
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
 - **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
 - **Stable machine contracts.** Scan JSONL, final Markdown, diagnostics, and generated reports have separate channels. Downstream scripts must be able to consume stdout without guessing whether it contains mixed formats.
@@ -96,6 +96,8 @@ Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. The c
 The default user config path is `~/.sift/config.toml`; it is created on first run from `config.example.toml`-equivalent defaults and must not contain raw secrets.
 
 `concurrency` (default: available parallelism, hard-capped at 256 with a visible stderr note) sets the number of per-file scan workers. The walk itself stays single-threaded, and every worker result is re-ordered into walk order before it reaches stdout or the model seed, so `--scan-only` JSONL, agent-gate JSON, `sift query` truncation, and `sift surface` ledgers are byte-identical at any worker count.
+
+The same cap bounds the model stage: independent Reduce batches run on up to `concurrency` workers (model side capped at 8, with a visible stderr note) and are merged in batch order, so a full audit's wall clock falls with the number of batches while the merged report stays byte-identical. Cloned clients share one transport and one atomic breaker, so concurrent batches stop together instead of each burning a separate retry budget.
 
 ## Timeout, breaker & recovery (never grind)
 

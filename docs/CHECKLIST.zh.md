@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `f15ed6d` —「docs: make the experiment reproducible without the lab scripts」，外加本次会话的并行扫描改动（`src/scanner.rs`、`tests/scan_concurrency.rs`） |
-| 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁与 P0/P1 扫描相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
+| 提交 | `90c7f60` —「perf(scan): fan per-file dehydration across cfg.concurrency workers (#1)」，外加本次会话的并行 Reduce 改动（`src/react.rs`、`src/model.rs`、`tests/full_audit_mock.rs`） |
+| 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce 相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 175 个通过，0 个失败（`src/**` 内 147 个单测 + `tests/*.rs` 内 28 个黑盒测试） |
+| 测试 | ✅ 181 个通过，0 个失败（`src/**` 内 152 个单测 + `tests/*.rs` 内 29 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -126,7 +126,8 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | 7 | G | 完整审计 stdout 只含最终报告 | ✅ 完成 | internal-gate PASS「Full audit stdout is reserved for the final report」；测试 `scan_only_stdout_remains_jsonl_not_benchmark_json` |
 | 8 | G | 无效配置明确失败，绝不静默回退默认值 | ✅ 完成 | 测试 `dirty_values_reject_config_not_silent_default`、`valid_toml_wrong_types_reject_config_not_silent_default`、`rejects_dirty_env_lines` |
 | 9 | G | `--module` 审计限定在项目根内，不串到全局 | ✅ 完成 | 测试 `absolute_module_must_stay_inside_target`、`absolute_module_inside_target_is_allowed`；internal-gate PASS「Module path is contained by project root」 |
-| 10 | G | fake-endpoint 完整审计 smoke 证明用户路径可用 | 🟡 部分完成 | 仅有人工证据：`reports/full-audit-local-model-test.md` 是针对某个本地 OpenAI 兼容端点跑出来的。**没有接成自动化/可在 CI 复现的测试**（需要 mock HTTP server 或录制好的 fixture 响应）。且该报告早于当前「small-model Map 默认不激活」的行为，已经不能反映当前默认的纯 Reduce 路径 |
+| 10 | G | fake-endpoint 完整审计 smoke 证明用户路径可用 | ✅ 完成 | `tests/full_audit_mock.rs` 在 `127.0.0.1:0` 起一个本地 OpenAI 兼容 mock，把隔离的 `~/.sift/config.toml` 指向它，并用真实二进制跑通默认的纯 Reduce 路径：请求 5 个批次、峰值 4 个在途、退出码 0、stdout 有收敛表格行。取代了人工证据 `reports/full-audit-local-model-test.md`（该报告早于 small-model Map 默认不激活的行为） |
+| 11 | F | 互不依赖的 Reduce 批次最多按 `concurrency` 并行（模型侧封顶 8），并按批序合并 | ✅ 完成 | `react::run_batches` + `react::MAX_REDUCE_PARALLEL`；`ModelClient` 克隆共享同一个 `Arc<dyn Transport>` 与同一个原子熔断器（`clones_share_one_breaker`）。单测 `run_batches_overlaps_work_across_workers`、`run_batches_returns_batch_order_not_completion_order`、`run_batches_with_one_worker_stays_serial`、`run_batches_reports_partial_without_dropping_other_batches`；`tests/full_audit_mock.rs` 端到端证明并发 |
 
 ### P4b — Agent gate 与 policy
 
@@ -154,7 +155,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | 6 | F | `--debug` 额外 stderr 诊断 | ✅ 完成 | `main.rs` 中的 debug `eprintln!` 代码块 |
 | 7 | B | 小模型 Map（`map_small_pool`）保留为未激活的诊断脚手架，默认完整审计路径不调用 | 🟡 部分完成（按设计如此） | `model.rs` 中代码与 4 个测试均存在（`small_pool_maps_successful_observations` 等），但 `main.rs` 只打印 `"small-model Map inactive: reduce converges from deterministic findings"`，从不调用它。这与 AGENT.md 的表述完全一致——它被正确标注成脚手架，不是缺陷——但仍是一个**尚未决定的路线图问题**：是在行为级门禁后重新接入，还是彻底下线 |
 
-**阶段结论：🟡 基本完成——与项目自述的「P4 进行中」一致。** 真正悬而未决的工程问题是 P4a 的 #10（没有 CI 自动化的完整审计 smoke）和 P4c 的 #3（`doctor` 无测试）；小模型 Map 的去留（P4c #7）是一个明确的待决策问题，不是 bug。
+**阶段结论：🟡 基本完成——与项目自述的「P4 进行中」一致。** 仍未完成的工程问题是 P4c 的 #3（`doctor` 无测试）；小模型 Map 的去留（P4c #7）是明确的待决策问题，不是 bug。P4a #10（CI 自动化的完整审计 smoke）已在本次会话关闭。
 
 ---
 
@@ -294,13 +295,12 @@ Agent gate 的 verdict 规则（`render_agent_gate`）只有在 `findings` 完�
 
 ## 汇总：待办事项
 
-把上文所有非 ✅ 完成的条目汇总在一处。上一份快照中的两项已在本会话中解决，此处不再列入（agent gate 自审 CAUTION 的根因已修复；ROADMAP P5 标题已刷新）——前者详见[自我审计 dogfood 检查](#自我审计-dogfood-检查)。
+把上文所有非 ✅ 完成的条目汇总在一处。此前快照中已解决的事项不再列入：agent gate 自审 CAUTION 的根因（详见[自我审计 dogfood 检查](#自我审计-dogfood-检查)）、ROADMAP P5 标题，以及本次会话解决的「完整审计 smoke 仅人工验证」（P4a #10，现为 `tests/full_audit_mock.rs`）。
 
 | 事项 | 阶段 | 状态 | 建议下一步 |
 |------|------|------|------------|
 | 没有黑盒测试断言「完整审计缺 Key 时退出码为 1」 | P0 | 🟡 部分完成 | 在 `tests/` 下新增一个集成测试 |
 | 没有百兆压力测试样本；macOS 上常驻内存指标永远是 `"unavailable"` | P1 | ⬜ 未完成 | 新增大仓库 smoke 测试；把 `resident_memory_metric` 扩展到 macOS（`task_info`/`ps`） |
-| fake-endpoint 完整审计 smoke 仅为人工验证，未接入 CI，且早于当前小模型 Map 默认不激活的行为 | P4a | 🟡 部分完成 | 新增一个基于 mock HTTP server、端到端跑通 `react::ReAct` 的集成测试 |
 | 原有的 policy 压制逻辑（针对 `RiskFinding` 的 `apply_policy`/`policy_match`/`policy_override_match`）没有直接的端到端单测验证压制本身——只测试了 TOML 解析（`parses_policy_schema_and_rejects_bad_severity`）。本会话新增的 artifact 加白路径有测试，但原有的 finding 加白路径仍然没有 | P4b | 🟡 部分完成 | 在 `report.rs` 中为 `apply_policy`/denylist/severity-override 新增单测，参照新增的 `policy_allowlist_*` artifact 测试写法 |
 | `sift doctor` 自动化测试覆盖为零 | P4c | 🟡 部分完成 | 为 `Doctor`/`run_doctor` 补单测，和/或新增 `tests/doctor.rs` 黑盒测试 |
 | 小模型 Map 是未激活脚手架；重新接入还是下线仍未决定 | P4c | 🟡 部分完成（按设计如此） | 由维护者决策，之后要么接到行为级门禁之后，要么删除 |

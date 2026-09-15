@@ -13,11 +13,11 @@
 
 | | |
 |---|---|
-| Commit | `f15ed6d` — "docs: make the experiment reproducible without the lab scripts", plus this session's parallel-scan change (`src/scanner.rs`, `tests/scan_concurrency.rs`) |
-| Date assessed | 2026-09-15 — build, tests, gate, and the P0/P1 scan rows were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
+| Commit | `90c7f60` — "perf(scan): fan per-file dehydration across cfg.concurrency workers (#1)", plus this session's parallel-Reduce change (`src/react.rs`, `src/model.rs`, `tests/full_audit_mock.rs`) |
+| Date assessed | 2026-09-15 — build, tests, gate, the P0/P1 scan rows, and the P4a Reduce rows were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
 | `cargo build` | ✅ pass |
 | `make ci` (`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`) | ✅ pass, exit 0 |
-| Tests | ✅ 175 passed, 0 failed (147 unit tests in `src/**` + 28 black-box tests in `tests/*.rs`) |
+| Tests | ✅ 181 passed, 0 failed (152 unit tests in `src/**` + 29 black-box tests in `tests/*.rs`) |
 | Internal quality gate (`reports/internal-gate.md`) | ✅ 14/14 checks PASS, 0 WARN, 0 FAIL |
 
 ## Legend
@@ -130,7 +130,8 @@ ROADMAP status: **not marked done**; README self-reports "in progress." This is 
 | 7 | G | Full-audit stdout contains only the final report | ✅ Done | internal-gate PASS "Full audit stdout is reserved for the final report"; test `scan_only_stdout_remains_jsonl_not_benchmark_json` |
 | 8 | G | Invalid config fails loudly, never silently reverts to defaults | ✅ Done | Tests `dirty_values_reject_config_not_silent_default`, `valid_toml_wrong_types_reject_config_not_silent_default`, `rejects_dirty_env_lines` |
 | 9 | G | `--module` audit is contained inside the project root, never bleeds to global | ✅ Done | Tests `absolute_module_must_stay_inside_target`, `absolute_module_inside_target_is_allowed`; internal-gate PASS "Module path is contained by project root" |
-| 10 | G | Fake-endpoint full-audit smoke proves the user-facing path | 🟡 Partial | Manual evidence only: `reports/full-audit-local-model-test.md` was produced against a local OpenAI-compatible endpoint. **Not wired as an automated/CI-reproducible test** (needs a mock HTTP server or recorded fixture responses). That report also predates the current "small-model Map inactive by default" behavior, so it no longer reflects the default Reduce-only path |
+| 10 | G | Fake-endpoint full-audit smoke proves the user-facing path | ✅ Done | `tests/full_audit_mock.rs` starts a local OpenAI-compatible mock on `127.0.0.1:0`, points an isolated `~/.sift/config.toml` at it, and runs the real binary through the default Reduce-only path: 5 batches requested, peak 4 in flight, exit 0, converged table row on stdout. Replaces the manual `reports/full-audit-local-model-test.md` evidence, which predated the small-model-Map-inactive default |
+| 11 | F | Independent Reduce batches overlap up to `concurrency` (model side capped at 8) and merge in batch order | ✅ Done | `react::run_batches` + `react::MAX_REDUCE_PARALLEL`; `ModelClient` clones share one `Arc<dyn Transport>` and one atomic breaker (`clones_share_one_breaker`). Unit tests `run_batches_overlaps_work_across_workers`, `run_batches_returns_batch_order_not_completion_order`, `run_batches_with_one_worker_stays_serial`, `run_batches_reports_partial_without_dropping_other_batches`; `tests/full_audit_mock.rs` proves overlap end to end |
 
 ### P4b — Agent gate & policy
 
@@ -158,7 +159,7 @@ ROADMAP status: **not marked done**; README self-reports "in progress." This is 
 | 6 | F | `--debug` extra stderr diagnostics | ✅ Done | `main.rs` debug `eprintln!` blocks |
 | 7 | B | Small-model Map (`map_small_pool`) is retained as inactive diagnostic scaffolding, not called by the default full-audit path | 🟡 Partial (by design) | Code + 4 tests exist in `model.rs` (`small_pool_maps_successful_observations`, etc.), but `main.rs` prints `"small-model Map inactive: reduce converges from deterministic findings"` and never calls it. This matches AGENT.md's framing exactly — it is correctly labeled scaffolding, not a defect — but it is still an **open roadmap decision**: reintroduce behind a behavior-level gate, or retire it |
 
-**Phase verdict: 🟡 Mostly done — matches the project's own "P4 in progress" self-report.** The two genuinely open engineering items are #10 in P4a (no CI-automated full-audit smoke) and #3 in P4c (`doctor` untested); the small-model Map question (#7 in P4c) is an intentional open decision, not a bug.
+**Phase verdict: 🟡 Mostly done — matches the project's own "P4 in progress" self-report.** The remaining open engineering item is #3 in P4c (`doctor` untested); the small-model Map question (#7 in P4c) is an intentional open decision, not a bug. P4a #10 (CI-automated full-audit smoke) was closed this session.
 
 ---
 
@@ -298,13 +299,12 @@ The agent gate's verdict rule (`render_agent_gate`) only returns `ACCEPT` when `
 
 ## Consolidated open items
 
-Everything not marked ✅ Done above, in one place. Two items from the previous snapshot were resolved this session and are omitted here (agent-gate self-CAUTION root causes fixed; ROADMAP P5 heading refreshed) — see [Self-audit dogfood check](#self-audit-dogfood-check) for the former.
+Everything not marked ✅ Done above, in one place. Items already resolved in earlier snapshots are omitted: the agent-gate self-CAUTION root causes (see [Self-audit dogfood check](#self-audit-dogfood-check)), the ROADMAP P5 heading, and — from this session — the manual-only full-audit smoke (P4a #10), now `tests/full_audit_mock.rs`.
 
 | Item | Phase | Status | Suggested next step |
 |------|-------|--------|----------------------|
 | No black-box test asserts exit code 1 for a real full-audit run with no key | P0 | 🟡 Partial | Add an integration test under `tests/` |
 | No 100 MB stress fixture; macOS resident-memory metric is always `"unavailable"` | P1 | ⬜ Not done | Add a large-corpus smoke test; extend `resident_memory_metric` to macOS (`task_info`/`ps`) |
-| Fake-endpoint full-audit smoke is manual-only, not CI-automated, and predates the current small-model-Map-inactive default | P4a | 🟡 Partial | Add a mock-HTTP-server integration test exercising `react::ReAct` end to end |
 | The pre-existing policy-suppression logic (`apply_policy`/`policy_match`/`policy_override_match` for `RiskFinding`s) has no direct unit test exercising suppression end-to-end — only TOML parsing is tested (`parses_policy_schema_and_rejects_bad_severity`). The new artifact-allowlist path added this session is tested; the original finding-allowlist path still is not | P4b | 🟡 Partial | Add `apply_policy`/denylist/severity-override unit tests in `report.rs`, mirroring the new `policy_allowlist_*` artifact tests |
 | `sift doctor` has zero automated test coverage | P4c | 🟡 Partial | Add unit tests for `Doctor`/`run_doctor` and/or a `tests/doctor.rs` black-box test |
 | Small-model Map is inactive scaffolding; reintroduce-or-retire decision is still open | P4c | 🟡 Partial (by design) | Maintainer decision, then either wire behind a behavior-level gate or delete |

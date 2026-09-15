@@ -31,7 +31,18 @@ fn benchmark_mode_outputs_stable_json_without_model_keys() {
     assert_eq!(json["repo"]["name"], "benign-controls");
     assert!(json["scan"]["candidate_files"].as_u64().unwrap_or(0) > 0);
     assert!(json["scan"]["wall_clock_ms"].is_number());
-    assert!(json["memory"]["source"].is_string());
+    let memory_source = json["memory"]["source"].as_str().unwrap_or("missing");
+    assert!(!memory_source.is_empty());
+    // A supported release target must report the peak, not "unavailable".
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_ne!(memory_source, "unavailable");
+        assert!(
+            json["memory"]["resident_set_peak_kib"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+    }
     assert!(json["seed"]["bytes_sent"].as_u64().unwrap_or(0) > 0);
     assert!(json["model"]["large_model"]["calls"].as_u64().unwrap_or(1) == 0);
     assert!(

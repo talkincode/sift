@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `90c7f60` —「perf(scan): fan per-file dehydration across cfg.concurrency workers (#1)」，外加本次会话的并行 Reduce 改动（`src/react.rs`、`src/model.rs`、`tests/full_audit_mock.rs`） |
+| 提交 | `dbd92e2` —「perf(reduce): run independent Reduce batches in parallel, merge in batch order (#2)」，外加本次会话的内存指标改动（`src/main.rs`、`tests/memory_scale.rs`） |
 | 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce 相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 181 个通过，0 个失败（`src/**` 内 152 个单测 + `tests/*.rs` 内 29 个黑盒测试） |
+| 测试 | ✅ 183 个通过，0 个失败（`src/**` 内 153 个单测 + `tests/*.rs` 内 30 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -61,11 +61,11 @@ ROADMAP 状态：**已完成 ✓**
 | 4 | F | 跨界引用标记 `[EXTERNAL_BLACKBOX]` | ✅ 完成 | `fn is_external`；测试 `intra_crate_rust_imports_are_not_external` 确认不会对 `crate::`/`super::` 误标 |
 | 5 | B | 丢弃注释与函数体；脱水后立即 drop AST（从不保留） | ✅ 完成 | 由实现方式保证：`dehydrate()` 只返回扁平摘要；`main.rs` 中任何位置都未保存 `tree_sitter::Tree` |
 | 6 | B | 残缺语法不 panic | ✅ 完成 | 测试 `broken_input_no_panic` |
-| 7 | G | 百兆仓库：内存稳定、不崩溃 | ⬜ 未完成 | 没有已提交的大仓库/压力测试样本，也没有对应规模的 CI job。`--benchmark` 可以*报告*常驻内存，但 `resident_memory_metric`（`src/main.rs`）仅在 `#[cfg(target_os = "linux")]` 下实现；**macOS 上永远返回 `"unavailable"`**，而 CI 的 `macos-latest` job 从未真正验证过这个指标 |
+| 7 | G | 百兆仓库：内存稳定、不崩溃 | 🟡 部分完成 | 指标缺口已补上：`resident_memory_metric` 在 Linux 走 procfs、在 macOS 走 `getrusage`/`RuMaxrss` 报告峰值常驻内存，由 `resident_memory_metric_reports_a_peak_where_supported` 与 `tests/benchmark_mode.rs` 在两个 CI 平台上断言。「与规模脱钩」也从口头声明变成了测试——`tests/memory_scale.rs` 运行时生成 24 MiB 语料、固定并发数，断言文件数 6 倍时峰值不超过 3 倍（实测 1.5–1.7 倍），并有绝对上限。但还不是字面上的单份 100 MB 语料 |
 | 8 | G | `extract.rs` 测试覆盖典型输入与残缺输入 | ✅ 完成 | `extract.rs::tests` 内 17 个测试函数，含畸形输入与未知扩展名场景 |
 | 9 | F | 并行扫描：逐文件脱水按 `concurrency` 个工作线程展开，并按 walk 顺序消费（ROADMAP 画像：「多模型 + 并发提速」） | ✅ 完成 | `src/scanner.rs::scan_ordered` / `OrderedScan`：许可窗口（`16 x workers`，在途文件上限 256）为乱序缓冲设界；超过 256 个工作线程会在 stderr 明确提示后封顶（`scan_ordered_caps_absurd_concurrency_without_dropping_files`）。`tests/scan_concurrency.rs` 证明 1 / 8 / 10 万线程下 `--scan-only` JSONL、agent-gate JSON、`query`、`surface` 输出逐字节一致，且改动前二进制与本版本在 RAM-TA3 上四类契约完全一致。实测（release、24 核、scan wall clock、5 次中位数）：RAM-TA3 2824ms → 487ms（5.8x）、TeamsACS 2341ms → 438ms（5.3x）、sift 自身 92ms → 22ms（4.2x）；RAM-TA3 峰值常驻内存 50MB → 74MB；`--concurrency 1` 仍约 2.85s，串行路径无回退 |
 
-**阶段结论：🟡 基本完成。** 唯一未验证的门禁是百兆内存稳定性声明；且 macOS（一个受支持的 CI/发布目标）目前完全没有可用的常驻内存指标。
+**阶段结论：🟡 基本完成。** 常驻内存现在在两个受支持平台上都能测量，且「与树规模脱钩」已在 24 MiB 规模上有断言；只剩字面上的百兆单份语料未测。
 
 ---
 
@@ -300,7 +300,7 @@ Agent gate 的 verdict 规则（`render_agent_gate`）只有在 `findings` 完�
 | 事项 | 阶段 | 状态 | 建议下一步 |
 |------|------|------|------------|
 | 没有黑盒测试断言「完整审计缺 Key 时退出码为 1」 | P0 | 🟡 部分完成 | 在 `tests/` 下新增一个集成测试 |
-| 没有百兆压力测试样本；macOS 上常驻内存指标永远是 `"unavailable"` | P1 | ⬜ 未完成 | 新增大仓库 smoke 测试；把 `resident_memory_metric` 扩展到 macOS（`task_info`/`ps`） |
+| 内存规模证明止于运行时生成的约 24 MiB 语料，未到字面上的 100 MB | P1 | 🟡 部分完成 | 可视需要调大 `tests/memory_scale.rs` 的语料；「与规模脱钩」的契约本身已有断言 |
 | 原有的 policy 压制逻辑（针对 `RiskFinding` 的 `apply_policy`/`policy_match`/`policy_override_match`）没有直接的端到端单测验证压制本身——只测试了 TOML 解析（`parses_policy_schema_and_rejects_bad_severity`）。本会话新增的 artifact 加白路径有测试，但原有的 finding 加白路径仍然没有 | P4b | 🟡 部分完成 | 在 `report.rs` 中为 `apply_policy`/denylist/severity-override 新增单测，参照新增的 `policy_allowlist_*` artifact 测试写法 |
 | `sift doctor` 自动化测试覆盖为零 | P4c | 🟡 部分完成 | 为 `Doctor`/`run_doctor` 补单测，和/或新增 `tests/doctor.rs` 黑盒测试 |
 | 小模型 Map 是未激活脚手架；重新接入还是下线仍未决定 | P4c | 🟡 部分完成（按设计如此） | 由维护者决策，之后要么接到行为级门禁之后，要么删除 |

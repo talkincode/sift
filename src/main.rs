@@ -412,31 +412,43 @@ fn scan_one_file(ctx: &FileScanContext, path: &Path) -> FileOutcome {
     let Some(sum) = extract::dehydrate(rel, &src) else {
         return FileOutcome::ParseFailed;
     };
-    let json = if ctx.scan_only || ctx.needs_seed {
+    // `--scan-only` streams the record itself; an audit only needs its size for
+    // coverage, so it counts the serialized bytes instead of materializing a
+    // large string per file just to drop it again.
+    let mut full_json = None;
+    let mut full_json_bytes = 0usize;
+    if ctx.scan_only {
         match serde_json::to_string(&sum) {
-            Ok(json) => Some(json),
+            Ok(json) => {
+                full_json_bytes = json.len();
+                full_json = Some(json);
+            }
             Err(_) => return FileOutcome::SerializationFailed,
         }
-    } else {
-        None
-    };
+    } else if ctx.needs_seed {
+        let mut counter = ByteCounter::default();
+        if serde_json::to_writer(&mut counter, &sum).is_err() {
+            return FileOutcome::SerializationFailed;
+        }
+        full_json_bytes = counter.bytes;
+    }
     let candidate_seed_bytes = if ctx.needs_seed {
-        json.as_ref()
-            .map(|json| json.len().saturating_add(1))
-            .unwrap_or(0)
+        full_json_bytes.saturating_add(1)
     } else {
         0
     };
     let mut seed = None;
     let mut seed_failed = false;
     if ctx.needs_seed {
-        match compact_seed_record(&sum, SEED_CAP) {
+        // The uncompacted size is already known, so the compactor never has to
+        // re-serialize the full summary to report it.
+        match compact_seed_record(&sum, SEED_CAP, full_json_bytes) {
             Some(record) => seed = Some(record),
             None => seed_failed = true,
         }
     }
     FileOutcome::Dehydrated {
-        full_json: if ctx.scan_only { json } else { None },
+        full_json,
         candidate_seed_bytes,
         seed,
         seed_failed,
@@ -1555,10 +1567,39 @@ fn resident_memory_metric() -> BenchmarkMemory {
             };
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(value) = macos_peak_resident_kib() {
+            return BenchmarkMemory {
+                resident_set_peak_kib: Some(value),
+                source: "getrusage:RuMaxrss".to_string(),
+            };
+        }
+    }
     BenchmarkMemory {
         resident_set_peak_kib: None,
         source: "unavailable".to_string(),
     }
+}
+
+/// Peak resident set size of this process in KiB.
+///
+/// `getrusage` reports `ru_maxrss` in bytes on macOS (Linux reports KiB, but
+/// that target reads procfs instead). Without this, `--benchmark` could not
+/// report memory on a supported release target.
+#[cfg(target_os = "macos")]
+fn macos_peak_resident_kib() -> Option<u64> {
+    // Zeroed storage so the result is defined even if the kernel fills only
+    // part of the struct, and so no uninitialized bytes are ever read.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `RUSAGE_SELF` with a valid, writable `rusage` pointer only reads
+    // this process's own accounting; the call cannot outlive `usage`.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    u64::try_from(usage.ru_maxrss)
+        .ok()
+        .map(|bytes| bytes / 1024)
 }
 
 #[cfg(target_os = "linux")]
@@ -1849,7 +1890,31 @@ struct SeedRecord {
     reason: String,
 }
 
-fn compact_seed_record(sum: &extract::AstSummary, cap: usize) -> Option<SeedRecord> {
+/// Counts serialized bytes without keeping them, for coverage that needs a
+/// payload's size rather than the payload.
+#[derive(Default)]
+struct ByteCounter {
+    bytes: usize,
+}
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `original_bytes` is the already-measured size of the uncompacted record, so
+/// the compactor never re-serializes the summary to report it.
+fn compact_seed_record(
+    sum: &extract::AstSummary,
+    cap: usize,
+    original_bytes: usize,
+) -> Option<SeedRecord> {
     let mut sig_limit = 24usize;
     let mut call_limit = 80usize;
     let mut loc_limit = 120usize;
@@ -1870,9 +1935,7 @@ fn compact_seed_record(sum: &extract::AstSummary, cap: usize) -> Option<SeedReco
                     + record.omitted.locations
                     + record.omitted.external
                     > 0,
-                original_bytes: serde_json::to_string(sum)
-                    .map(|json| json.len())
-                    .unwrap_or(0),
+                original_bytes,
                 reason: "compact_record_limits".to_string(),
             });
         }
@@ -1892,9 +1955,7 @@ fn compact_seed_record(sum: &extract::AstSummary, cap: usize) -> Option<SeedReco
                 path: sum.path.clone(),
                 json,
                 truncated: true,
-                original_bytes: serde_json::to_string(sum)
-                    .map(|json| json.len())
-                    .unwrap_or(0),
+                original_bytes,
                 reason: "minimal_record_after_size_cap".to_string(),
             });
         }
@@ -2181,6 +2242,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resident_memory_metric_reports_a_peak_where_supported() {
+        let metric = resident_memory_metric();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(
+                metric.resident_set_peak_kib.is_some(),
+                "expected a resident-memory source, got {}",
+                metric.source
+            );
+            assert!(
+                metric.resident_set_peak_kib.unwrap_or(0) > 0,
+                "peak resident set should be positive"
+            );
+            assert_ne!(metric.source, "unavailable");
+        }
+    }
+
+    #[test]
     fn missing_key_hint_stays_available_to_main() {
         assert!(config::missing_large_key_hint().contains("SIFT_API_KEY"));
     }
@@ -2237,7 +2315,10 @@ mod tests {
             });
         }
 
-        let record = compact_seed_record(&summary, 4096);
+        let original_bytes = serde_json::to_string(&summary)
+            .map(|json| json.len())
+            .unwrap_or(0);
+        let record = compact_seed_record(&summary, 4096, original_bytes);
         assert!(record.is_some(), "record serializes");
         let record = match record {
             Some(record) => record,

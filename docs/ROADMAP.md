@@ -40,7 +40,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
 - **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
 - **Stable machine contracts.** Scan JSONL, final Markdown, diagnostics, and generated reports have separate channels. Downstream scripts must be able to consume stdout without guessing whether it contains mixed formats.
-- **Memory decoupled from scale.** Stream and drop; resident memory stays low.
+- **Memory decoupled from scale.** Stream and drop; resident memory stays low. `--benchmark` reports the peak resident set on both supported platforms (procfs on Linux, `getrusage` on macOS), and the audit path measures a payload's size by counting its serialized bytes instead of materializing it.
 - **Internally gated.** The project must pass its own maintainer-only release gates; modular, TDD-guarded, clear boundaries.
 - **Priority on conflict:** robust > usable report > cheap > fast > small.
 

@@ -13,11 +13,11 @@
 
 | | |
 |---|---|
-| Commit | `90c7f60` — "perf(scan): fan per-file dehydration across cfg.concurrency workers (#1)", plus this session's parallel-Reduce change (`src/react.rs`, `src/model.rs`, `tests/full_audit_mock.rs`) |
+| Commit | `dbd92e2` — "perf(reduce): run independent Reduce batches in parallel, merge in batch order (#2)", plus this session's memory-metric change (`src/main.rs`, `tests/memory_scale.rs`) |
 | Date assessed | 2026-09-15 — build, tests, gate, the P0/P1 scan rows, and the P4a Reduce rows were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
 | `cargo build` | ✅ pass |
 | `make ci` (`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`) | ✅ pass, exit 0 |
-| Tests | ✅ 181 passed, 0 failed (152 unit tests in `src/**` + 29 black-box tests in `tests/*.rs`) |
+| Tests | ✅ 183 passed, 0 failed (153 unit tests in `src/**` + 30 black-box tests in `tests/*.rs`) |
 | Internal quality gate (`reports/internal-gate.md`) | ✅ 14/14 checks PASS, 0 WARN, 0 FAIL |
 
 ## Legend
@@ -65,11 +65,11 @@ ROADMAP status: **done ✓**
 | 4 | F | Cross-boundary references marked `[EXTERNAL_BLACKBOX]` | ✅ Done | `fn is_external`; test `intra_crate_rust_imports_are_not_external` confirms it does **not** over-flag `crate::`/`super::` |
 | 5 | B | Bodies/comments omitted; AST dropped immediately after dehydration (never retained) | ✅ Done | By construction: `dehydrate()` returns only the flat summary; no `tree_sitter::Tree` is stored anywhere in `main.rs` |
 | 6 | B | Malformed syntax tolerated without panicking | ✅ Done | Test `broken_input_no_panic` |
-| 7 | G | 100 MB repo: stable memory, no crash | ⬜ Not done | No committed large-repo/stress fixture or CI job of this scale exists. `--benchmark` can *report* resident memory, but only on Linux (`resident_memory_metric` in `src/main.rs` is `#[cfg(target_os = "linux")]`); **on macOS it always reports `"unavailable"`**, and CI's `macos-latest` job never exercises this metric |
+| 7 | G | 100 MB repo: stable memory, no crash | 🟡 Partial | The metric gap is closed: `resident_memory_metric` reports peak RSS from procfs on Linux and `getrusage`/`RuMaxrss` on macOS, asserted by `resident_memory_metric_reports_a_peak_where_supported` and by `tests/benchmark_mode.rs` on both CI platforms. The decoupling contract is now a test rather than a claim — `tests/memory_scale.rs` generates a 24 MiB corpus, pins concurrency, and asserts that 6x the files stays under 3x the peak (measured 1.5-1.7x) with an absolute ceiling. Still not a literal 100 MB single corpus |
 | 8 | G | `extract.rs` tests cover typical + broken input | ✅ Done | 17 test functions in `extract.rs::tests`, including malformed-input and unknown-extension cases |
 | 9 | F | Parallel scan: per-file dehydration fans out over `concurrency` workers and is consumed in walk order (ROADMAP profile: "Multi-model + concurrency") | ✅ Done | `src/scanner.rs::scan_ordered` / `OrderedScan`: a permit window (`16 x workers`, capped at 256 files in flight) bounds the reorder buffer, and workers above 256 are capped with a visible stderr note (`scan_ordered_caps_absurd_concurrency_without_dropping_files`). `tests/scan_concurrency.rs` proves byte-identical `--scan-only` JSONL, agent-gate JSON, `query`, and `surface` output at 1 vs 8 vs 100k workers, and the pre-change binary matches this one on RAM-TA3 for all four contracts. Measured (release, 24 cores, scan wall clock, median of 5): RAM-TA3 2824ms → 487ms (5.8x), TeamsACS 2341ms → 438ms (5.3x), sift itself 92ms → 22ms (4.2x); peak RSS on RAM-TA3 grows 50MB → 74MB, and `--concurrency 1` still ~2.85s, so the serial path did not regress |
 
-**Phase verdict: 🟡 Mostly done.** The only unverified gate is the 100 MB memory-stability claim, and macOS (a supported CI/release target) currently has no working resident-memory metric at all.
+**Phase verdict: 🟡 Mostly done.** Resident memory is now measured on both supported platforms and its decoupling from tree size is asserted at 24 MiB scale; only a literal 100 MB corpus remains untested.
 
 ---
 
@@ -304,7 +304,7 @@ Everything not marked ✅ Done above, in one place. Items already resolved in ea
 | Item | Phase | Status | Suggested next step |
 |------|-------|--------|----------------------|
 | No black-box test asserts exit code 1 for a real full-audit run with no key | P0 | 🟡 Partial | Add an integration test under `tests/` |
-| No 100 MB stress fixture; macOS resident-memory metric is always `"unavailable"` | P1 | ⬜ Not done | Add a large-corpus smoke test; extend `resident_memory_metric` to macOS (`task_info`/`ps`) |
+| The memory-scale proof tops out at a generated ~24 MiB corpus, not a literal 100 MB run | P1 | 🟡 Partial | Optionally raise the corpus in `tests/memory_scale.rs`; the decoupling contract itself is already asserted |
 | The pre-existing policy-suppression logic (`apply_policy`/`policy_match`/`policy_override_match` for `RiskFinding`s) has no direct unit test exercising suppression end-to-end — only TOML parsing is tested (`parses_policy_schema_and_rejects_bad_severity`). The new artifact-allowlist path added this session is tested; the original finding-allowlist path still is not | P4b | 🟡 Partial | Add `apply_policy`/denylist/severity-override unit tests in `report.rs`, mirroring the new `policy_allowlist_*` artifact tests |
 | `sift doctor` has zero automated test coverage | P4c | 🟡 Partial | Add unit tests for `Doctor`/`run_doctor` and/or a `tests/doctor.rs` black-box test |
 | Small-model Map is inactive scaffolding; reintroduce-or-retire decision is still open | P4c | 🟡 Partial (by design) | Maintainer decision, then either wire behind a behavior-level gate or delete |

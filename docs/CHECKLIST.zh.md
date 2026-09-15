@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `dbd92e2` —「perf(reduce): run independent Reduce batches in parallel, merge in batch order (#2)」，外加本次会话的内存指标改动（`src/main.rs`、`tests/memory_scale.rs`） |
-| 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce 相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
+| 提交 | `79cad29` —「perf(memory): report peak RSS on macOS, and stop sizing payloads by building them (#3)」，外加本次会话的 doctor/缺 Key 测试工作（`tests/doctor.rs`、`tests/missing_key.rs`） |
+| 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 183 个通过，0 个失败（`src/**` 内 153 个单测 + `tests/*.rs` 内 30 个黑盒测试） |
+| 测试 | ✅ 194 个通过，0 个失败（`src/**` 内 154 个单测 + `tests/*.rs` 内 40 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -43,9 +43,9 @@ ROADMAP 状态：**已完成 ✓**
 | 4 | G | `cargo build` 绿 | ✅ 完成 | 本次会话验证（`make ci` 退出码 0） |
 | 5 | G | `src/` 内 0 处 `unwrap()`/`expect()` | ✅ 完成 | `reports/internal-gate.md`：「No direct unwrap/expect in src」— PASS |
 | 6 | G | `--scan-only` 无需任何模型 Key 即可扫描 | ✅ 完成 | `tests/benchmark_mode.rs::scan_only_stdout_remains_jsonl_not_benchmark_json` |
-| 7 | G | 完整审计缺大模型 Key 时在调度前退出 | 🟡 部分完成 | 代码路径已存在（`src/main.rs:83-86`、`config::missing_large_key_hint`），但单测只覆盖提示文案内容（`missing_key_hint_uses_parseable_model_block`）；**没有黑盒测试实际拉起二进制、在非 `--scan-only`/`--agent-gate`/`--benchmark` 路径下缺 Key 时断言进程退出码** |
+| 7 | G | 完整审计缺大模型 Key 时在调度前退出 | ✅ 完成 | `tests/missing_key.rs::full_audit_without_a_key_exits_one_with_an_injection_hint` 清空所有 Key 来源后拉起真实二进制，断言退出码 1、stderr 上有 `missing large-model API key` / `SIFT_API_KEY` 提示、stdout 为空、且快速失败。对应的反向契约（`scan_only_still_runs_without_any_key`）固定住「确定性层永不需要 Key」 |
 
-**阶段结论：✅ 完成**，仅 #7 存在测试覆盖缺口。
+**阶段结论：✅ 完成**，所有门禁均有自动化证据。
 
 ---
 
@@ -149,13 +149,13 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 |---|---|------|------|------|
 | 1 | F | `--benchmark` 本地 telemetry（不调用模型；可选 USD 成本估算） | ✅ 完成 | `tests/benchmark_mode.rs`（3/3 通过） |
 | 2 | F | `sift github owner/repo` 安全 intake——绝不 build/install/跑 hook/碰 submodule；扫描前检查文件/字节上限、`.gitmodules`、Git LFS | ✅ 完成 | `run_github_intake`、`parse_github_repo`、`inspect_checkout_dir`；测试 `github_repo_parser_accepts_owner_repo_and_https`、`checkout_inspection_reports_lfs_and_limits`、`github_intake_rejects_non_github_url_without_network`（黑盒）。`git` fetch 与递归调用本地 `sift` 均跑在 `run_command_with_timeout` 之下（120s / 600s 硬 deadline，超时即 kill） |
-| 3 | F | `sift doctor`——配置/密钥/端点诊断 | 🟡 部分完成 | 已实现（`run_doctor`、`check_config_permissions`、`check_file_config`、`check_endpoint_key_pair` 等），但**自动化测试覆盖为零**——`config.rs::tests` 里没有任何单测覆盖 `run_doctor`/`Doctor`，`tests/` 下也没有黑盒测试拉起 `sift doctor`。内部门禁「每个文件有 `#[cfg(test)]`」的 BT 检查之所以对 `config.rs` 显示 PASS，只是因为同一文件里*其他*函数有测试——它看不见这个缺口 |
+| 3 | F | `sift doctor`——配置/密钥/端点诊断 | ✅ 完成 | `tests/doctor.rs` 每个用例都用独立的临时 `HOME` 跑真实二进制：健康配置（PASS 行，含 `permissions 600`）、非法 TOML（FAIL + 退出 1）、配置缺失（创建不含密钥的默认配置、WARN、退出 0）、权限 644（仅告警）、本地端点无 Key（PASS，无需鉴权）、公网端点缺 `key_env`（FAIL + 退出 1）、Azure 风格 Key 配 `api.openai.com`（FAIL + 401 警告），以及 Key 值绝不出现在 stdout/stderr |
 | 4 | F | `--save`/`--save-to` 持久化报告（`reports/sift-audit-result-YYYYMMDD-NNN.md`） | ✅ 完成 | `main.rs` 中 `save_audit_result`、`next_audit_result_path`、`utc_yyyymmdd`、`civil_from_days` |
 | 5 | F | `--report-language {en,zh}` 双语 Markdown 报告 | ✅ 完成 | `ReportLanguage`；测试 `localized_headings_render_for_zh` |
 | 6 | F | `--debug` 额外 stderr 诊断 | ✅ 完成 | `main.rs` 中的 debug `eprintln!` 代码块 |
 | 7 | B | 小模型 Map（`map_small_pool`）保留为未激活的诊断脚手架，默认完整审计路径不调用 | 🟡 部分完成（按设计如此） | `model.rs` 中代码与 4 个测试均存在（`small_pool_maps_successful_observations` 等），但 `main.rs` 只打印 `"small-model Map inactive: reduce converges from deterministic findings"`，从不调用它。这与 AGENT.md 的表述完全一致——它被正确标注成脚手架，不是缺陷——但仍是一个**尚未决定的路线图问题**：是在行为级门禁后重新接入，还是彻底下线 |
 
-**阶段结论：🟡 基本完成——与项目自述的「P4 进行中」一致。** 仍未完成的工程问题是 P4c 的 #3（`doctor` 无测试）；小模型 Map 的去留（P4c #7）是明确的待决策问题，不是 bug。P4a #10（CI 自动化的完整审计 smoke）已在本次会话关闭。
+**阶段结论：🟡 基本完成——与项目自述的「P4 进行中」一致。** 除小模型 Map 去留（P4c #7，属于明确的待决策事项而非缺陷）外，P4 的每个条目现在都有证据。
 
 ---
 
@@ -299,10 +299,8 @@ Agent gate 的 verdict 规则（`render_agent_gate`）只有在 `findings` 完�
 
 | 事项 | 阶段 | 状态 | 建议下一步 |
 |------|------|------|------------|
-| 没有黑盒测试断言「完整审计缺 Key 时退出码为 1」 | P0 | 🟡 部分完成 | 在 `tests/` 下新增一个集成测试 |
 | 内存规模证明止于运行时生成的约 24 MiB 语料，未到字面上的 100 MB | P1 | 🟡 部分完成 | 可视需要调大 `tests/memory_scale.rs` 的语料；「与规模脱钩」的契约本身已有断言 |
 | 原有的 policy 压制逻辑（针对 `RiskFinding` 的 `apply_policy`/`policy_match`/`policy_override_match`）没有直接的端到端单测验证压制本身——只测试了 TOML 解析（`parses_policy_schema_and_rejects_bad_severity`）。本会话新增的 artifact 加白路径有测试，但原有的 finding 加白路径仍然没有 | P4b | 🟡 部分完成 | 在 `report.rs` 中为 `apply_policy`/denylist/severity-override 新增单测，参照新增的 `policy_allowlist_*` artifact 测试写法 |
-| `sift doctor` 自动化测试覆盖为零 | P4c | 🟡 部分完成 | 为 `Doctor`/`run_doctor` 补单测，和/或新增 `tests/doctor.rs` 黑盒测试 |
 | 小模型 Map 是未激活脚手架；重新接入还是下线仍未决定 | P4c | 🟡 部分完成（按设计如此） | 由维护者决策，之后要么接到行为级门禁之后，要么删除 |
 | 「更多语法」没有固定目标 | P6 | ⏳ 待定 | 不算缺陷；按语言诉求逐条建 issue 跟踪，而不是靠本清单 |
 | 文档 ↔ 代码一致性没有自动化守卫 | P6 | 🟡 部分完成 | 可以考虑在 `audit.rs` 里加一条检查，把 `README.md` 的支持语言列表和 `extract.rs::Lang` 的变体做交叉核对 |

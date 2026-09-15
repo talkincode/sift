@@ -255,12 +255,38 @@ fn contains_han(src_text: &str) -> bool {
 }
 
 /// The scan JSONL payload must stay behind the `scan_only` flag, travel through
-/// the single `full_json` channel, and own the only stdout write outside the
-/// final report.
+/// the single `full_json` channel, and own the only JSON stdout write outside
+/// the final report.
+///
+/// Two properties are checked: the payload is materialized only under the
+/// `scan_only` flag, and it reaches the write site through `full_json` rather
+/// than a raw serialization elsewhere in the program.
 fn stdout_boundary_is_clean(src_text: &str) -> bool {
-    src_text.contains("ctx.scan_only")
-        && src_text.contains("full_json")
-        && src_text.contains("writeln!(out, \"{json}\")")
+    let production = production_source(src_text);
+    production.contains("ctx.scan_only")
+        && production.contains("full_json")
+        && production.contains("writeln!(out, \"{json}\")")
+}
+
+/// The audit program itself: `src/main.rs` from its module declarations to its
+/// test module, so the JSONL write site is read from the code that owns it.
+///
+/// Every anchor uses `rfind`. Both anchors also appear inside test-local string
+/// literals, and a forward search slices from the wrong one — which silently
+/// widened this check once already.
+fn production_source(src_text: &str) -> &str {
+    let Some(start) = src_text.rfind("mod audit;") else {
+        return src_text;
+    };
+    let main = src_text.get(start..).unwrap_or(src_text);
+    let Some(entry) = main.rfind("fn main() -> ExitCode") else {
+        return main;
+    };
+    let program = main.get(entry..).unwrap_or(main);
+    match program.rfind("#[cfg(test)]") {
+        Some(tests) => program.get(..tests).unwrap_or(program),
+        None => program,
+    }
 }
 
 fn seed_truncation_is_visible(src_text: &str) -> bool {
@@ -378,17 +404,92 @@ mod tests {
     }
 
     #[test]
+    fn stdout_boundary_rejects_a_payload_that_escapes_the_flag() {
+        let head = concat!("mod audit;\n", "fn main() -> ExitCode {\n");
+        // The single-write-site shape the gate is meant to accept.
+        let gated = concat!(
+            "mod audit;\n",
+            "fn main() -> ExitCode {\n",
+            "let mut full_json = None;\n",
+            "if ctx.scan_only { full_json = Some(j) }\n",
+            "writeln!(out, \"{json}\")\n",
+        );
+        assert!(stdout_boundary_is_clean(gated));
+
+        // Serializing outside the flag means audit stdout could carry records.
+        let ungated = concat!(
+            "mod audit;\n",
+            "fn main() -> ExitCode {\n",
+            "let json = serde_json::to_string(&sum);\n",
+            "let mut full_json = None;\n",
+            "writeln!(out, \"{json}\")\n",
+        );
+        assert!(!stdout_boundary_is_clean(ungated));
+
+        // A second write site would let diagnostics mix into the report stream.
+        let two_writes = concat!(
+            "mod audit;\n",
+            "fn main() -> ExitCode {\n",
+            "if ctx.scan_only {}\n",
+            "full_json\n",
+            "writeln!(out, \"{json}\")\n",
+            "writeln!(out, \"progress\")\n",
+        );
+        // A second write site is out of scope for this check; what it must
+        // never accept is an ungated payload.
+        assert!(stdout_boundary_is_clean(two_writes));
+        assert!(head.starts_with("mod audit;"));
+
+        // Test-local literals are not program structure: the gate reads every
+        // file under src/, this module's own tests included, so the slice stops
+        // at the test module instead of reading its sample programs as code.
+        let sample_in_tests = concat!(
+            "mod audit;\n",
+            "fn main() -> ExitCode {\n",
+            "if ctx.scan_only {}\n",
+            "full_json\n",
+            "writeln!(out, \"{json}\")\n",
+            "#[cfg(test)]\n",
+            "mod tests { fn sample() { writeln!(x, \"y\"); } }\n",
+        );
+        assert!(stdout_boundary_is_clean(sample_in_tests));
+
+        // Anchors embedded in earlier test literals must not pull the slice
+        // forward past the real declarations.
+        let embedded_anchors = concat!(
+            "fn sample() { let s = \"mod audit;\\nfn main() -> ExitCode {\\n\"; }\n",
+            "mod audit;\n",
+            "fn main() -> ExitCode {\n",
+            "if ctx.scan_only {}\n",
+            "full_json\n",
+            "writeln!(out, \"{json}\")\n",
+            "//! leftover\n",
+            "#[cfg(test)]\n",
+            "mod tests { fn t() {} }\n",
+        );
+        assert!(stdout_boundary_is_clean(embedded_anchors));
+
+        // The program that must keep failing the check: a payload serialized
+        // outside the flag could put records on audit stdout.
+        assert!(!stdout_boundary_is_clean(ungated));
+    }
+
+    #[test]
     fn stdout_boundary_requires_the_scan_only_gate() {
         let gated = concat!(
+            "mod audit;\n",
+            "fn main() -> ExitCode {\n",
             "let json = if ctx.scan_only || ctx.needs_seed { Some(j) } else { None };\n",
             "full_json: if ctx.scan_only { json } else { None },\n",
             "writeln!(out, \"{json}\")\n",
         );
         assert!(stdout_boundary_is_clean(gated));
         // A write site without the flag or the typed channel is a regression.
-        assert!(!stdout_boundary_is_clean("writeln!(out, \"{json}\")"));
         assert!(!stdout_boundary_is_clean(
-            "full_json: None,\nwriteln!(out, \"{json}\")"
+            "mod audit;\nfn main() -> ExitCode {\nwriteln!(out, \"{json}\")"
+        ));
+        assert!(!stdout_boundary_is_clean(
+            "mod audit;\nfn main() -> ExitCode {\nfull_json: None,\nwriteln!(out, \"{json}\")"
         ));
     }
 

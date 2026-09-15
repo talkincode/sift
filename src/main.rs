@@ -106,7 +106,6 @@ fn main() -> ExitCode {
 
     eprintln!("scan started");
     let scan_started = Instant::now();
-    let rx = scanner::spawn_scan(&cfg);
     let mut scan = ScanStats::default();
     let mut dehydrated = 0usize;
     let mut seed_records = Vec::new();
@@ -114,80 +113,65 @@ fn main() -> ExitCode {
     let mut seed_record_truncated = 0usize;
     let mut truncated_records = Vec::new();
     let mut suspicious_artifacts = Vec::new();
-    const SEED_CAP: usize = 64 * 1024;
     let mut out = std::io::stdout().lock();
-    for path in rx {
+    let scan_ctx = FileScanContext {
+        root: cfg.root.clone(),
+        max_bytes: cfg.max_bytes,
+        scan_only: cfg.scan_only,
+        needs_seed,
+    };
+    // Files are read and parsed on `cfg.concurrency` workers; results are
+    // consumed in walk order, so every downstream contract is unchanged.
+    let mut ordered = scanner::scan_ordered(&cfg, move |path| scan_one_file(&scan_ctx, path));
+    while let Some(outcome) = ordered.next_item() {
         scan.candidate_files += 1;
-        let rel_path = audit_relative_path(&path, &cfg.root).display().to_string();
-        let meta = match std::fs::metadata(&path) {
-            Ok(meta) => meta,
-            Err(_) => {
-                scan.read_failed += 1;
-                log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
-                continue;
+        match outcome {
+            FileOutcome::ReadFailed => scan.read_failed += 1,
+            FileOutcome::TooLarge { artifact } | FileOutcome::Unsupported { artifact } => {
+                scan.unsupported_files += 1;
+                if let Some(artifact) = artifact {
+                    suspicious_artifacts.push(artifact);
+                }
             }
-        };
-        if meta.len() > cfg.max_bytes {
-            scan.unsupported_files += 1;
-            if let Some(artifact) = inspect_suspicious_artifact(&rel_path, meta.len(), &meta, true)
-            {
-                suspicious_artifacts.push(artifact);
+            FileOutcome::ParseFailed => scan.parse_failed += 1,
+            FileOutcome::SerializationFailed => {
+                dehydrated += 1;
+                scan.serialization_failed += 1;
             }
-            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
-            continue;
-        }
-        let Ok(src) = std::fs::read(&path) else {
-            scan.read_failed += 1;
-            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
-            continue;
-        };
-        if extract::Lang::from_path(&path).is_none() {
-            scan.unsupported_files += 1;
-            if let Some(artifact) = inspect_suspicious_artifact(&rel_path, meta.len(), &meta, false)
-            {
-                suspicious_artifacts.push(artifact);
-            }
-            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
-            continue;
-        }
-        // Record paths relative to the audit root so scope classification and
-        // reports stay stable and never leak the host's absolute layout.
-        let rel = audit_relative_path(&path, &cfg.root);
-        let Some(sum) = extract::dehydrate(rel, &src) else {
-            scan.parse_failed += 1;
-            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
-            continue;
-        };
-        dehydrated += 1;
-        match serde_json::to_string(&sum) {
-            Ok(j) => {
+            FileOutcome::Dehydrated {
+                full_json,
+                candidate_seed_bytes,
+                seed,
+                seed_failed,
+            } => {
+                dehydrated += 1;
                 if needs_seed {
                     seed_candidate_bytes =
-                        seed_candidate_bytes.saturating_add(j.len().saturating_add(1));
-                    match compact_seed_record(&sum, SEED_CAP) {
-                        Some(record) => {
-                            if record.truncated {
-                                seed_record_truncated = seed_record_truncated.saturating_add(1);
-                                truncated_records.push(report::TruncatedRecord {
-                                    path: record.path,
-                                    original_bytes: record.original_bytes,
-                                    compacted_bytes: record.json.len(),
-                                    reason: record.reason,
-                                });
-                            }
-                            seed_records.push(record.json);
-                        }
-                        None => scan.serialization_failed += 1,
-                    }
+                        seed_candidate_bytes.saturating_add(candidate_seed_bytes);
                 }
-                if cfg.scan_only {
+                match seed {
+                    Some(record) => {
+                        if record.truncated {
+                            seed_record_truncated = seed_record_truncated.saturating_add(1);
+                            truncated_records.push(report::TruncatedRecord {
+                                path: record.path,
+                                original_bytes: record.original_bytes,
+                                compacted_bytes: record.json.len(),
+                                reason: record.reason,
+                            });
+                        }
+                        seed_records.push(record.json);
+                    }
+                    None if seed_failed => scan.serialization_failed += 1,
+                    None => {}
+                }
+                if let Some(json) = full_json {
                     // Broken stdout pipes from tools like head are clean exits, not crashes.
-                    if writeln!(out, "{j}").is_err() {
+                    if writeln!(out, "{json}").is_err() {
                         return ExitCode::SUCCESS;
                     }
                 }
             }
-            Err(_) => scan.serialization_failed += 1,
         }
         // ASTs are dropped inside dehydrate; full audits keep only compact JSONL records.
         log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
@@ -372,6 +356,96 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Cap for one compacted seed record. Records above it are trimmed step by step
+/// so the Reduce prompt stays bounded no matter how large a single file is.
+const SEED_CAP: usize = 64 * 1024;
+
+/// Per-file inputs a scan worker needs; owned so workers never borrow `Config`.
+struct FileScanContext {
+    root: PathBuf,
+    max_bytes: u64,
+    scan_only: bool,
+    needs_seed: bool,
+}
+
+/// One file's contribution to the audit, produced off the main thread.
+enum FileOutcome {
+    ReadFailed,
+    TooLarge {
+        artifact: Option<report::SuspiciousArtifact>,
+    },
+    Unsupported {
+        artifact: Option<report::SuspiciousArtifact>,
+    },
+    ParseFailed,
+    SerializationFailed,
+    Dehydrated {
+        /// Full dehydrated JSON, only materialized for `--scan-only` streams.
+        full_json: Option<String>,
+        /// Bytes the full record would add to the seed (coverage accounting).
+        candidate_seed_bytes: usize,
+        seed: Option<SeedRecord>,
+        seed_failed: bool,
+    },
+}
+
+/// Read, classify, dehydrate, and compact one file. Pure with respect to the
+/// audit state, so it can run on any worker thread.
+fn scan_one_file(ctx: &FileScanContext, path: &Path) -> FileOutcome {
+    let rel_path = audit_relative_path(path, &ctx.root).display().to_string();
+    let Ok(meta) = std::fs::metadata(path) else {
+        return FileOutcome::ReadFailed;
+    };
+    if meta.len() > ctx.max_bytes {
+        return FileOutcome::TooLarge {
+            artifact: inspect_suspicious_artifact(&rel_path, meta.len(), &meta, true),
+        };
+    }
+    let Ok(src) = std::fs::read(path) else {
+        return FileOutcome::ReadFailed;
+    };
+    if extract::Lang::from_path(path).is_none() {
+        return FileOutcome::Unsupported {
+            artifact: inspect_suspicious_artifact(&rel_path, meta.len(), &meta, false),
+        };
+    }
+    // Record paths relative to the audit root so scope classification and
+    // reports stay stable and never leak the host's absolute layout.
+    let rel = audit_relative_path(path, &ctx.root);
+    let Some(sum) = extract::dehydrate(rel, &src) else {
+        return FileOutcome::ParseFailed;
+    };
+    let json = if ctx.scan_only || ctx.needs_seed {
+        match serde_json::to_string(&sum) {
+            Ok(json) => Some(json),
+            Err(_) => return FileOutcome::SerializationFailed,
+        }
+    } else {
+        None
+    };
+    let candidate_seed_bytes = if ctx.needs_seed {
+        json.as_ref()
+            .map(|json| json.len().saturating_add(1))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut seed = None;
+    let mut seed_failed = false;
+    if ctx.needs_seed {
+        match compact_seed_record(&sum, SEED_CAP) {
+            Some(record) => seed = Some(record),
+            None => seed_failed = true,
+        }
+    }
+    FileOutcome::Dehydrated {
+        full_json: if ctx.scan_only { json } else { None },
+        candidate_seed_bytes,
+        seed,
+        seed_failed,
+    }
 }
 
 fn save_audit_result(cfg: &Config, markdown: &str) {

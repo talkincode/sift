@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::Serialize;
@@ -300,50 +301,79 @@ fn is_lock_or_manifest_path(path: &str) -> bool {
     )
 }
 
+/// Per-file inputs a surface worker needs; owned so workers never borrow `Config`.
+struct SurfaceScanContext {
+    root: PathBuf,
+    max_bytes: u64,
+}
+
+/// How one file contributed to the ledger, for coverage accounting.
+enum SurfaceScanKind {
+    ReadFailed,
+    Unsupported,
+    ParseFailed,
+    Scanned,
+}
+
+/// Read, classify, and shape one file into capability entries. Pure with respect
+/// to the ledger, so it can run on any worker thread.
+fn scan_one_file(ctx: &SurfaceScanContext, path: &Path) -> (SurfaceScanKind, Vec<SurfaceEntry>) {
+    let mut found = Vec::new();
+    let Ok(meta) = std::fs::metadata(path) else {
+        return (SurfaceScanKind::ReadFailed, found);
+    };
+    let rel = path.strip_prefix(&ctx.root).unwrap_or(path);
+    let rel_path = rel.display().to_string();
+
+    if meta.len() > ctx.max_bytes {
+        if let Some(artifact) =
+            crate::inspect_suspicious_artifact(&rel_path, meta.len(), &meta, true)
+        {
+            push_artifact(&mut found, &rel_path, &artifact);
+        }
+        return (SurfaceScanKind::Unsupported, found);
+    }
+    if extract::Lang::from_path(path).is_none() {
+        if let Some(artifact) =
+            crate::inspect_suspicious_artifact(&rel_path, meta.len(), &meta, false)
+        {
+            push_artifact(&mut found, &rel_path, &artifact);
+        }
+        return (SurfaceScanKind::Unsupported, found);
+    }
+    let Ok(src) = std::fs::read(path) else {
+        return (SurfaceScanKind::ReadFailed, found);
+    };
+    let Some(sum) = extract::dehydrate(rel, &src) else {
+        return (SurfaceScanKind::ParseFailed, found);
+    };
+    classify(&sum, &mut found);
+    audit_shape(&rel_path, &src, &mut found);
+    (SurfaceScanKind::Scanned, found)
+}
+
 /// Walk the tree once and turn dehydrated evidence into capability entries.
 pub fn collect(cfg: &Config) -> (Vec<SurfaceEntry>, SurfaceCoverage) {
-    let rx = scanner::spawn_scan(cfg);
+    let ctx = SurfaceScanContext {
+        root: cfg.root.clone(),
+        max_bytes: cfg.max_bytes,
+    };
+    // Files are read and classified on `cfg.concurrency` workers; partial
+    // ledgers are merged in walk order so the stable sort below stays
+    // deterministic for equal keys.
+    let mut ordered = scanner::scan_ordered(cfg, move |path| scan_one_file(&ctx, path));
     let mut coverage = SurfaceCoverage::default();
     let mut entries = Vec::new();
 
-    for path in rx {
+    while let Some((kind, mut found)) = ordered.next_item() {
         coverage.candidate_files += 1;
-        let Ok(meta) = std::fs::metadata(&path) else {
-            coverage.read_failed += 1;
-            continue;
-        };
-        let rel = path.strip_prefix(&cfg.root).unwrap_or(&path);
-        let rel_path = rel.display().to_string();
-
-        if meta.len() > cfg.max_bytes {
-            coverage.unsupported_files += 1;
-            if let Some(artifact) =
-                crate::inspect_suspicious_artifact(&rel_path, meta.len(), &meta, true)
-            {
-                push_artifact(&mut entries, &rel_path, &artifact);
-            }
-            continue;
+        match kind {
+            SurfaceScanKind::ReadFailed => coverage.read_failed += 1,
+            SurfaceScanKind::Unsupported => coverage.unsupported_files += 1,
+            SurfaceScanKind::ParseFailed => coverage.parse_failed += 1,
+            SurfaceScanKind::Scanned => coverage.scanned_files += 1,
         }
-        if extract::Lang::from_path(&path).is_none() {
-            coverage.unsupported_files += 1;
-            if let Some(artifact) =
-                crate::inspect_suspicious_artifact(&rel_path, meta.len(), &meta, false)
-            {
-                push_artifact(&mut entries, &rel_path, &artifact);
-            }
-            continue;
-        }
-        let Ok(src) = std::fs::read(&path) else {
-            coverage.read_failed += 1;
-            continue;
-        };
-        let Some(sum) = extract::dehydrate(rel, &src) else {
-            coverage.parse_failed += 1;
-            continue;
-        };
-        coverage.scanned_files += 1;
-        classify(&sum, &mut entries);
-        audit_shape(&rel_path, &src, &mut entries);
+        entries.append(&mut found);
     }
 
     entries.sort_by(|a, b| {

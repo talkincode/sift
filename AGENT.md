@@ -33,7 +33,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 |------|------|-------|
 | `src/main.rs` | wiring: parse→Config→schedule→report→exit | P0 ✓ |
 | `src/config.rs` | fallback resolve, multi-model config | P0 ✓→P2 |
-| `src/scanner.rs` | Walk + bounded channel | P0 ✓ |
+| `src/scanner.rs` | Walk + bounded channel + ordered N-worker dehydrate | P0 ✓→P1 |
 | `src/extract.rs` | tree-sitter dehydrate → AstSummary | P1 ✓ |
 | `src/query.rs` | stateless evidence query (rescan + regex filters) | P1 ✓ |
 | `src/surface.rs` | install-surface capability ledger (no model, target config never read) | P7 ✓ |

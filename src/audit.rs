@@ -133,7 +133,7 @@ fn run_checks(project_root: &Path) -> Vec<Check> {
         "DF",
         stdout_boundary_is_clean(&src_text),
         "Full audit stdout is reserved for the final report",
-        "scan JSONL should be emitted only when cfg.scan_only is true",
+        "scan JSONL should be materialized only under scan_only, through one write site",
     );
     push(
         &mut checks,
@@ -254,8 +254,13 @@ fn contains_han(src_text: &str) -> bool {
         .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
 }
 
+/// The scan JSONL payload must stay behind the `scan_only` flag, travel through
+/// the single `full_json` channel, and own the only stdout write outside the
+/// final report.
 fn stdout_boundary_is_clean(src_text: &str) -> bool {
-    src_text.contains("if cfg.scan_only") && src_text.contains("writeln!(out, \"{j}\")")
+    src_text.contains("ctx.scan_only")
+        && src_text.contains("full_json")
+        && src_text.contains("writeln!(out, \"{json}\")")
 }
 
 fn seed_truncation_is_visible(src_text: &str) -> bool {
@@ -370,6 +375,21 @@ mod tests {
         fs::write(dir.join("docs/AGENT.zh.md"), "").ok();
         assert!(!docs_avoid_direct_api_key(&dir));
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stdout_boundary_requires_the_scan_only_gate() {
+        let gated = concat!(
+            "let json = if ctx.scan_only || ctx.needs_seed { Some(j) } else { None };\n",
+            "full_json: if ctx.scan_only { json } else { None },\n",
+            "writeln!(out, \"{json}\")\n",
+        );
+        assert!(stdout_boundary_is_clean(gated));
+        // A write site without the flag or the typed channel is a regression.
+        assert!(!stdout_boundary_is_clean("writeln!(out, \"{json}\")"));
+        assert!(!stdout_boundary_is_clean(
+            "full_json: None,\nwriteln!(out, \"{json}\")"
+        ));
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

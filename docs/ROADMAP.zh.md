@@ -16,7 +16,7 @@
 ```text
   CLI key file / ENV / ~/.sift/config.toml ──(降级寻址, 缺 Key 即退)
         ▼
-  扫描层  ignore::Walk → 有界 channel(消费即丢)         [P0 ✓]
+  扫描层  ignore::Walk → 有界 channel → concurrency 个工作线程(保持 walk 顺序)  [P0 ✓→P1]
         ▼
   零阶    tree-sitter 脱水(签名/import/调用) → JSON → drop AST  [P1 ✓]
         │  跨界引用打 [EXTERNAL_BLACKBOX]
@@ -36,7 +36,7 @@
 - **零摩擦冷启动。** `sift ./repo --scan-only` 直接跑；缺 `~/.sift/config.toml` 时自动创建不含密钥的默认配置；不交互追问；缺 Key 立退给注入提示。
 - **成本可控可预算。** 确定性 baseline 本地完成；完整审计才把脱水骨架交给大模型。
 - **模型调度。** ReACT 状态机把确定性发现与大模型收敛编排成一条链，技能是编译期写死的本地函数。
-- **多模型 + 并发提速。** 可配置多个模型端点；扫描/模型并发保持有界且可观测。
+- **多模型 + 并发提速。** 可配置多个模型端点；扫描按 `concurrency` 个工作线程并行脱水、按 walk 顺序消费结果，保证输出逐字节稳定；扫描/模型并发保持有界且可观测。
 - **绝不无脑死磕。** 每个外部调用有硬超时；连续失败触发熔断；熔断后退避恢复或降级，到顶则输出半成品而非挂死。
 - **默认工程级。** 一份看起来完整但实际不完整的审计报告就是缺陷。跳过输入、截断、回退、半成品模型结果、无效配置都必须可见且可测试。
 - **稳定机器契约。** 扫描 JSONL、最终 Markdown、诊断信息和生成报告各走清晰通道。下游脚本消费 stdout 时不应该猜里面是否混了多种格式。
@@ -94,6 +94,8 @@ max_retries = 1
 ```
 寻址降级：CLI key file > ENV > toml > 默认；无 large key 即退。当前完整审计默认不调用 small role 模型；小模型缺失不会改变确定性账本 Reduce 路径。
 默认用户配置路径为 `~/.sift/config.toml`；首次运行从等价于 `config.example.toml` 的安全默认值创建，不能写入明文密钥。
+
+`concurrency`（默认：可用并行度；硬上限 256，触顶时在 stderr 明确提示）决定逐文件扫描的工作线程数。walk 本身保持单线程，所有 worker 结果在写 stdout 或进入 seed 前按 walk 顺序重排，因此 `--scan-only` JSONL、agent-gate JSON、`sift query` 截断与 `sift surface` 账本在任意线程数下逐字节一致。
 
 ## 超时熔断与恢复（绝不死磕）
 

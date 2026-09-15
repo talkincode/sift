@@ -6,6 +6,7 @@
 //! scan per query can never serve stale results.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -43,47 +44,39 @@ pub fn run_query(query: QueryCli) -> ExitCode {
 
     let limit = query.limit;
     let started = Instant::now();
-    let rx = scanner::spawn_scan(&cfg);
     let mut coverage = QueryCoverage::default();
     let mut matches: Vec<FileMatch> = Vec::new();
     let mut matched_evidence = 0usize;
     let mut shown_evidence = 0usize;
 
-    for path in rx {
+    // Same stateless scan as `--scan-only`, fanned out over `cfg.concurrency`
+    // workers and consumed in walk order so `--limit` truncation is stable.
+    let ctx = QueryScanContext {
+        root: cfg.root.clone(),
+        max_bytes: cfg.max_bytes,
+    };
+    let mut ordered = scanner::scan_ordered(&cfg, move |path| scan_one_file(&ctx, &filters, path));
+    while let Some(outcome) = ordered.next_item() {
         coverage.candidate_files += 1;
-        let Ok(meta) = std::fs::metadata(&path) else {
-            coverage.read_failed += 1;
-            continue;
-        };
-        if meta.len() > cfg.max_bytes {
-            coverage.unsupported_files += 1;
-            continue;
+        match outcome {
+            QueryOutcome::ReadFailed => coverage.read_failed += 1,
+            QueryOutcome::Unsupported => coverage.unsupported_files += 1,
+            QueryOutcome::ParseFailed => coverage.parse_failed += 1,
+            QueryOutcome::Scanned(file_match) => {
+                coverage.scanned_files += 1;
+                let Some(mut file_match) = file_match else {
+                    continue;
+                };
+                matched_evidence += file_match.evidence.len();
+                // Full counts above stay honest; only the emitted evidence is capped.
+                if limit > 0 {
+                    let room = limit.saturating_sub(shown_evidence);
+                    file_match.evidence.truncate(room);
+                }
+                shown_evidence += file_match.evidence.len();
+                matches.push(file_match);
+            }
         }
-        if extract::Lang::from_path(&path).is_none() {
-            coverage.unsupported_files += 1;
-            continue;
-        }
-        let Ok(src) = std::fs::read(&path) else {
-            coverage.read_failed += 1;
-            continue;
-        };
-        let rel = path.strip_prefix(&cfg.root).unwrap_or(&path);
-        let Some(sum) = extract::dehydrate(rel, &src) else {
-            coverage.parse_failed += 1;
-            continue;
-        };
-        coverage.scanned_files += 1;
-        let Some(mut file_match) = match_record(&sum, &filters) else {
-            continue;
-        };
-        matched_evidence += file_match.evidence.len();
-        // Full counts above stay honest; only the emitted evidence is capped.
-        if limit > 0 {
-            let room = limit.saturating_sub(shown_evidence);
-            file_match.evidence.truncate(room);
-        }
-        shown_evidence += file_match.evidence.len();
-        matches.push(file_match);
     }
 
     matches.sort_by(|a, b| a.path.cmp(&b.path));
@@ -182,6 +175,43 @@ struct Evidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     line: Option<usize>,
     text: String,
+}
+
+/// Per-file inputs a query worker needs; owned so workers never borrow `Config`.
+struct QueryScanContext {
+    root: PathBuf,
+    max_bytes: u64,
+}
+
+/// One file's query outcome, produced off the main thread.
+enum QueryOutcome {
+    ReadFailed,
+    Unsupported,
+    ParseFailed,
+    /// Dehydrated and filtered; `None` means nothing in the file matched.
+    Scanned(Option<FileMatch>),
+}
+
+/// Read, dehydrate, and filter one file. Pure with respect to query state, so it
+/// can run on any worker thread.
+fn scan_one_file(ctx: &QueryScanContext, filters: &Filters, path: &Path) -> QueryOutcome {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return QueryOutcome::ReadFailed;
+    };
+    if meta.len() > ctx.max_bytes {
+        return QueryOutcome::Unsupported;
+    }
+    if extract::Lang::from_path(path).is_none() {
+        return QueryOutcome::Unsupported;
+    }
+    let Ok(src) = std::fs::read(path) else {
+        return QueryOutcome::ReadFailed;
+    };
+    let rel = path.strip_prefix(&ctx.root).unwrap_or(path);
+    let Some(sum) = extract::dehydrate(rel, &src) else {
+        return QueryOutcome::ParseFailed;
+    };
+    QueryOutcome::Scanned(match_record(&sum, filters))
 }
 
 #[derive(Debug, Serialize)]

@@ -13,12 +13,12 @@
 
 | | |
 |---|---|
-| Commit | `f9a374b` — "fix agent gate issue regressions (#39)" (4 commits past tag `v0.2.0`), plus uncommitted follow-up fixes from this session (see [Self-audit dogfood check](#self-audit-dogfood-check)) |
-| Date assessed | 2026-07-01 |
+| Commit | `f15ed6d` — "docs: make the experiment reproducible without the lab scripts", plus this session's parallel-scan change (`src/scanner.rs`, `tests/scan_concurrency.rs`) |
+| Date assessed | 2026-09-15 — build, tests, gate, and the P0/P1 scan rows were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
 | `cargo build` | ✅ pass |
 | `make ci` (`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`) | ✅ pass, exit 0 |
-| Tests | ✅ 127 passed, 0 failed (119 unit tests in `src/**` + 8 black-box tests in `tests/*.rs`) |
-| Internal quality gate (`reports/internal-gate.md`) | ✅ 13/13 checks PASS, 0 WARN, 0 FAIL |
+| Tests | ✅ 175 passed, 0 failed (147 unit tests in `src/**` + 28 black-box tests in `tests/*.rs`) |
+| Internal quality gate (`reports/internal-gate.md`) | ✅ 14/14 checks PASS, 0 WARN, 0 FAIL |
 
 ## Legend
 
@@ -42,7 +42,7 @@ ROADMAP status: **done ✓**
 | # | Type | Item | Status | Evidence |
 |---|---|------|--------|----------|
 | 1 | F | Fallback key resolution: CLI key file › ENV › project `.env` › `~/.sift/config.toml` › default | ✅ Done | `src/config.rs::Config::resolve`; tests `parses_project_env_file`, `explicit_api_key_file_must_be_readable_and_non_empty` |
-| 2 | F | Bounded-channel scanner (walk → bounded channel, consume & drop) | ✅ Done | `src/scanner.rs` (`crossbeam_channel::bounded::<PathBuf>(1024)`); test `scan_skips_ignored_dirs_and_large_files` |
+| 2 | F | Bounded-channel scanner (walk → bounded channel, consume & drop) | ✅ Done | `src/scanner.rs` (`crossbeam_channel::bounded::<ScanInput>(1024)` with walk-order `seq` tags); tests `scan_skips_ignored_dirs_and_large_files`, `scan_ordered_preserves_walk_order_when_workers_finish_out_of_order` |
 | 3 | F | Minimal end-to-end wiring: parse → Config → schedule → report → exit code | ✅ Done | `src/main.rs::main` |
 | 4 | G | `cargo build` green | ✅ Done | Verified this session (`make ci` exit 0) |
 | 5 | G | Zero `unwrap()`/`expect()` in `src/` | ✅ Done | `reports/internal-gate.md`: "No direct unwrap/expect in src" — PASS |
@@ -67,6 +67,7 @@ ROADMAP status: **done ✓**
 | 6 | B | Malformed syntax tolerated without panicking | ✅ Done | Test `broken_input_no_panic` |
 | 7 | G | 100 MB repo: stable memory, no crash | ⬜ Not done | No committed large-repo/stress fixture or CI job of this scale exists. `--benchmark` can *report* resident memory, but only on Linux (`resident_memory_metric` in `src/main.rs` is `#[cfg(target_os = "linux")]`); **on macOS it always reports `"unavailable"`**, and CI's `macos-latest` job never exercises this metric |
 | 8 | G | `extract.rs` tests cover typical + broken input | ✅ Done | 17 test functions in `extract.rs::tests`, including malformed-input and unknown-extension cases |
+| 9 | F | Parallel scan: per-file dehydration fans out over `concurrency` workers and is consumed in walk order (ROADMAP profile: "Multi-model + concurrency") | ✅ Done | `src/scanner.rs::scan_ordered` / `OrderedScan`: a permit window (`16 x workers`, capped at 256 files in flight) bounds the reorder buffer, and workers above 256 are capped with a visible stderr note (`scan_ordered_caps_absurd_concurrency_without_dropping_files`). `tests/scan_concurrency.rs` proves byte-identical `--scan-only` JSONL, agent-gate JSON, `query`, and `surface` output at 1 vs 8 vs 100k workers, and the pre-change binary matches this one on RAM-TA3 for all four contracts. Measured (release, 24 cores, scan wall clock, median of 5): RAM-TA3 2824ms → 487ms (5.8x), TeamsACS 2341ms → 438ms (5.3x), sift itself 92ms → 22ms (4.2x); peak RSS on RAM-TA3 grows 50MB → 74MB, and `--concurrency 1` still ~2.85s, so the serial path did not regress |
 
 **Phase verdict: 🟡 Mostly done.** The only unverified gate is the 100 MB memory-stability claim, and macOS (a supported CI/release target) currently has no working resident-memory metric at all.
 

@@ -9,12 +9,12 @@
 
 | | |
 |---|---|
-| 提交 | `f9a374b` —「fix agent gate issue regressions (#39)」（比标签 `v0.2.0` 多 4 个提交），另有本次会话的后续修复尚未提交（见[自我审计 dogfood 检查](#自我审计-dogfood-检查)） |
-| 评估日期 | 2026-07-01 |
+| 提交 | `f15ed6d` —「docs: make the experiment reproducible without the lab scripts」，外加本次会话的并行扫描改动（`src/scanner.rs`、`tests/scan_concurrency.rs`） |
+| 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁与 P0/P1 扫描相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 127 个通过，0 个失败（`src/**` 内 119 个单测 + `tests/*.rs` 内 8 个黑盒测试） |
-| 内部质量门禁（`reports/internal-gate.md`） | ✅ 13/13 检查 PASS，0 WARN，0 FAIL |
+| 测试 | ✅ 175 个通过，0 个失败（`src/**` 内 147 个单测 + `tests/*.rs` 内 28 个黑盒测试） |
+| 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
 
@@ -38,7 +38,7 @@ ROADMAP 状态：**已完成 ✓**
 | # | Type | 条目 | 状态 | 证据 |
 |---|---|------|------|------|
 | 1 | F | 降级寻址：CLI key file › ENV › 项目 `.env` › `~/.sift/config.toml` › 默认值 | ✅ 完成 | `src/config.rs::Config::resolve`；测试 `parses_project_env_file`、`explicit_api_key_file_must_be_readable_and_non_empty` |
-| 2 | F | 有界通道扫描器（Walk → 有界 channel，消费即丢） | ✅ 完成 | `src/scanner.rs`（`crossbeam_channel::bounded::<PathBuf>(1024)`）；测试 `scan_skips_ignored_dirs_and_large_files` |
+| 2 | F | 有界通道扫描器（Walk → 有界 channel，消费即丢） | ✅ 完成 | `src/scanner.rs`（`crossbeam_channel::bounded::<ScanInput>(1024)`，路径带 walk 顺序 `seq`）；测试 `scan_skips_ignored_dirs_and_large_files`、`scan_ordered_preserves_walk_order_when_workers_finish_out_of_order` |
 | 3 | F | 最小端到端装配：解析 → Config → 调度 → 报表 → 退出码 | ✅ 完成 | `src/main.rs::main` |
 | 4 | G | `cargo build` 绿 | ✅ 完成 | 本次会话验证（`make ci` 退出码 0） |
 | 5 | G | `src/` 内 0 处 `unwrap()`/`expect()` | ✅ 完成 | `reports/internal-gate.md`：「No direct unwrap/expect in src」— PASS |
@@ -63,6 +63,7 @@ ROADMAP 状态：**已完成 ✓**
 | 6 | B | 残缺语法不 panic | ✅ 完成 | 测试 `broken_input_no_panic` |
 | 7 | G | 百兆仓库：内存稳定、不崩溃 | ⬜ 未完成 | 没有已提交的大仓库/压力测试样本，也没有对应规模的 CI job。`--benchmark` 可以*报告*常驻内存，但 `resident_memory_metric`（`src/main.rs`）仅在 `#[cfg(target_os = "linux")]` 下实现；**macOS 上永远返回 `"unavailable"`**，而 CI 的 `macos-latest` job 从未真正验证过这个指标 |
 | 8 | G | `extract.rs` 测试覆盖典型输入与残缺输入 | ✅ 完成 | `extract.rs::tests` 内 17 个测试函数，含畸形输入与未知扩展名场景 |
+| 9 | F | 并行扫描：逐文件脱水按 `concurrency` 个工作线程展开，并按 walk 顺序消费（ROADMAP 画像：「多模型 + 并发提速」） | ✅ 完成 | `src/scanner.rs::scan_ordered` / `OrderedScan`：许可窗口（`16 x workers`，在途文件上限 256）为乱序缓冲设界；超过 256 个工作线程会在 stderr 明确提示后封顶（`scan_ordered_caps_absurd_concurrency_without_dropping_files`）。`tests/scan_concurrency.rs` 证明 1 / 8 / 10 万线程下 `--scan-only` JSONL、agent-gate JSON、`query`、`surface` 输出逐字节一致，且改动前二进制与本版本在 RAM-TA3 上四类契约完全一致。实测（release、24 核、scan wall clock、5 次中位数）：RAM-TA3 2824ms → 487ms（5.8x）、TeamsACS 2341ms → 438ms（5.3x）、sift 自身 92ms → 22ms（4.2x）；RAM-TA3 峰值常驻内存 50MB → 74MB；`--concurrency 1` 仍约 2.85s，串行路径无回退 |
 
 **阶段结论：🟡 基本完成。** 唯一未验证的门禁是百兆内存稳定性声明；且 macOS（一个受支持的 CI/发布目标）目前完全没有可用的常驻内存指标。
 

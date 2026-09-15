@@ -16,7 +16,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 ```text
   CLI key file / ENV / ~/.sift/config.toml ──(fallback resolve, exit if no key)
         ▼
-  Scan      ignore::Walk → bounded channel (consume & drop)        [P0 ✓]
+  Scan      ignore::Walk → bounded channel → concurrency workers (walk order)  [P0 ✓→P1]
         ▼
   Tier-0    tree-sitter dehydrate (sig/import/calls) → JSON → drop AST  [P1 ✓]
         │   cross-boundary refs marked [EXTERNAL_BLACKBOX]
@@ -36,7 +36,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - **Zero-friction cold start.** `sift ./repo --scan-only` just runs; missing `~/.sift/config.toml` is created with non-secret defaults; no interactive prompts; exits with an injection hint if the key is missing.
 - **Cost-controlled & budgetable.** The deterministic baseline is local; the large model only sees the dehydrated skeleton when full audit is requested.
 - **Model orchestration.** A ReACT state machine chains deterministic findings and large-model convergence; skills are compile-time local functions.
-- **Multi-model + concurrency.** Multiple endpoints are configurable; scan/model concurrency remains bounded and observable.
+- **Multi-model + concurrency.** Multiple endpoints are configurable; the scan fans per-file dehydration out over `concurrency` workers and consumes the results in walk order, so streams and reports stay byte-stable; scan/model concurrency remains bounded and observable.
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
 - **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
 - **Stable machine contracts.** Scan JSONL, final Markdown, diagnostics, and generated reports have separate channels. Downstream scripts must be able to consume stdout without guessing whether it contains mixed formats.
@@ -94,6 +94,8 @@ max_retries = 1
 ```
 Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. The current full-audit path does not call small-role models by default; missing small models do not change the deterministic-ledger Reduce path.
 The default user config path is `~/.sift/config.toml`; it is created on first run from `config.example.toml`-equivalent defaults and must not contain raw secrets.
+
+`concurrency` (default: available parallelism, hard-capped at 256 with a visible stderr note) sets the number of per-file scan workers. The walk itself stays single-threaded, and every worker result is re-ordered into walk order before it reaches stdout or the model seed, so `--scan-only` JSONL, agent-gate JSON, `sift query` truncation, and `sift surface` ledgers are byte-identical at any worker count.
 
 ## Timeout, breaker & recovery (never grind)
 

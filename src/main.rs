@@ -81,7 +81,7 @@ fn main() -> ExitCode {
 
     let needs_model = !(cfg.scan_only || cfg.agent_gate || cfg.benchmark);
     let needs_seed = needs_model || cfg.agent_gate || cfg.benchmark;
-    let mut reg = if !needs_model {
+    let reg = if !needs_model {
         None
     } else {
         let r = cfg.build_registry();
@@ -279,46 +279,41 @@ fn main() -> ExitCode {
     let react_batches = build_react_batches(&coverage, &seed_batches, cfg.report_language);
     let diagnostics = diagnostics_section(&coverage, None, cfg.report_language);
 
-    // Drive ReACT only when a large model is configured.
-    if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
+    // Drive ReACT only when a large model is configured. Batches are independent
+    // evidence, so they overlap up to the configured concurrency; `run_batches`
+    // still hands the outcomes back in batch order, so the merged report is
+    // byte-stable no matter which batch answers first.
+    if let Some(large) = reg.as_ref().and_then(|r| r.large.as_ref()) {
         let mut final_reports = Vec::new();
         let mut partial_reports = Vec::new();
-        eprintln!(
-            "large-model Reduce started, batches: {}",
-            react_batches.len()
-        );
-        for (idx, react_seed) in react_batches.iter().enumerate() {
+        let requested_parallel = cfg.concurrency.max(1);
+        let parallel = requested_parallel.min(react::MAX_REDUCE_PARALLEL);
+        if parallel < requested_parallel {
             eprintln!(
-                "large-model Reduce batch {}/{} seed_bytes={}",
-                idx + 1,
-                react_batches.len(),
-                react_seed.len()
+                "large-model Reduce parallel capped at {} (concurrency={requested_parallel})",
+                react::MAX_REDUCE_PARALLEL
             );
-            match react::ReAct::with_language(cfg.report_language).run(large, react_seed) {
-                react::Outcome::Final(rep) => {
-                    eprintln!(
-                        "large-model Reduce batch {}/{} complete",
-                        idx + 1,
-                        react_batches.len()
-                    );
-                    final_reports.push(BatchReport {
-                        idx,
-                        bytes: react_seed.len(),
-                        markdown: rep,
-                    });
-                }
-                react::Outcome::Partial(rep) => {
-                    eprintln!(
-                        "partial result in Reduce batch {}/{}: {rep}",
-                        idx + 1,
-                        react_batches.len()
-                    );
-                    partial_reports.push(BatchReport {
-                        idx,
-                        bytes: react_seed.len(),
-                        markdown: rep,
-                    });
-                }
+        }
+        eprintln!(
+            "large-model Reduce started, batches: {}  parallel: {}",
+            react_batches.len(),
+            parallel
+        );
+        for (idx, outcome) in
+            react::run_batches(large, &react_batches, cfg.report_language, parallel)
+        {
+            let bytes = react_batches.get(idx).map(String::len).unwrap_or(0);
+            match outcome {
+                react::Outcome::Final(markdown) => final_reports.push(BatchReport {
+                    idx,
+                    bytes,
+                    markdown,
+                }),
+                react::Outcome::Partial(markdown) => partial_reports.push(BatchReport {
+                    idx,
+                    bytes,
+                    markdown,
+                }),
             }
         }
         if partial_reports.is_empty() {

@@ -1,4 +1,6 @@
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -12,6 +14,7 @@ pub enum Role {
 }
 
 /// Model endpoint specification. Keys are resolved from env/files and never logged.
+#[derive(Clone)]
 pub struct ModelSpec {
     pub role: Role,
     pub endpoint: String,
@@ -63,27 +66,31 @@ pub trait Transport: Send + Sync {
 }
 
 /// Consecutive-failure breaker. Once tripped, callers stop I/O instead of spinning.
+///
+/// The counter is atomic so clones of one client (see [`ModelClient::clone`])
+/// share a single breaker: concurrent Reduce batches must stop together, not
+/// each burn their own retry budget.
 #[derive(Debug)]
 struct Breaker {
-    consecutive: u32,
+    consecutive: AtomicU32,
     threshold: u32,
 }
 
 impl Breaker {
     fn new(threshold: u32) -> Self {
         Self {
-            consecutive: 0,
+            consecutive: AtomicU32::new(0),
             threshold: threshold.max(1),
         }
     }
     fn tripped(&self) -> bool {
-        self.consecutive >= self.threshold
+        self.consecutive.load(Ordering::Relaxed) >= self.threshold
     }
-    fn ok(&mut self) {
-        self.consecutive = 0;
+    fn ok(&self) {
+        self.consecutive.store(0, Ordering::Relaxed);
     }
-    fn fail(&mut self) {
-        self.consecutive = self.consecutive.saturating_add(1);
+    fn fail(&self) {
+        self.consecutive.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -109,10 +116,14 @@ impl CallError {
 }
 
 /// Single model client with hard timeout, bounded retry, backoff, and breaker.
+///
+/// Cloning shares the transport connection pool and the breaker, so one client
+/// can drive several Reduce batches at once without multiplying retry budgets.
+#[derive(Clone)]
 pub struct ModelClient {
     spec: ModelSpec,
-    transport: Box<dyn Transport>,
-    breaker: Breaker,
+    transport: Arc<dyn Transport>,
+    breaker: Arc<Breaker>,
     backoff_base: Duration,
 }
 
@@ -120,8 +131,8 @@ impl ModelClient {
     pub fn new(spec: ModelSpec, transport: Box<dyn Transport>, breaker_threshold: u32) -> Self {
         Self {
             spec,
-            transport,
-            breaker: Breaker::new(breaker_threshold),
+            transport: Arc::from(transport),
+            breaker: Arc::new(Breaker::new(breaker_threshold)),
             backoff_base: Duration::from_millis(50),
         }
     }
@@ -143,7 +154,8 @@ impl ModelClient {
     }
 
     /// Send one completion request with bounded retry. Tripped breakers fail fast.
-    pub fn complete(&mut self, prompt: &str) -> Result<String, CallError> {
+    /// Takes `&self` so a client can be shared by concurrent Reduce workers.
+    pub fn complete(&self, prompt: &str) -> Result<String, CallError> {
         if self.breaker.tripped() {
             return Err(CallError::Tripped);
         }
@@ -413,6 +425,7 @@ fn uses_api_key_header(endpoint: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     struct Fake {
         seq: Mutex<Vec<Result<String, TransportError>>>,
@@ -494,6 +507,50 @@ mod tests {
     fn bad_json_counts_as_failure() {
         let mut c = ModelClient::new(spec(), Box::new(Fake::new(vec![Ok("nope".into())])), 1);
         assert_eq!(c.complete("p"), Err(CallError::Tripped));
+    }
+
+    #[test]
+    fn clones_share_one_breaker() {
+        struct AlwaysFail {
+            calls: Arc<AtomicUsize>,
+        }
+        impl Transport for AlwaysFail {
+            fn post(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Duration,
+            ) -> Result<String, TransportError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(TransportError::Timeout)
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let spec = ModelSpec {
+            max_retries: 0,
+            ..spec()
+        };
+        let client = ModelClient::new(
+            spec,
+            Box::new(AlwaysFail {
+                calls: Arc::clone(&calls),
+            }),
+            1,
+        );
+        let peer = client.clone();
+
+        assert_eq!(client.complete("p"), Err(CallError::Tripped));
+        let after_first = calls.load(Ordering::Relaxed);
+        assert_eq!(after_first, 1, "the first call reaches the transport once");
+        // A clone that did not share the breaker would spend another call here.
+        assert_eq!(peer.complete("p"), Err(CallError::Tripped));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            after_first,
+            "clones must share one breaker"
+        );
     }
 
     #[test]

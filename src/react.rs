@@ -1,14 +1,25 @@
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::config::ReportLanguage;
 use crate::model::{CallError, ModelClient};
 use crate::skills::Skill;
 
+/// Widest Reduce fan-out sift will open on its own. The large model is the
+/// expensive resource, so past this point extra concurrency mostly buys rate
+/// limits; callers with a lower `concurrency` get their value unchanged.
+pub const MAX_REDUCE_PARALLEL: usize = 8;
+
 /// Abstraction over large-model completion so tests can inject deterministic fakes.
-pub trait Completer {
-    fn ask(&mut self, prompt: &str) -> Result<String, CallError>;
+///
+/// `&self` plus `Send + Sync` lets one client serve several Reduce batches at
+/// once; the shared breaker inside `ModelClient` stops them together.
+pub trait Completer: Send + Sync {
+    fn ask(&self, prompt: &str) -> Result<String, CallError>;
 }
 
 impl Completer for ModelClient {
-    fn ask(&mut self, prompt: &str) -> Result<String, CallError> {
+    fn ask(&self, prompt: &str) -> Result<String, CallError> {
         self.complete(prompt)
     }
 }
@@ -53,7 +64,7 @@ impl ReAct {
     }
 
     /// Run until <FINAL>; bounded steps/errors return a partial result instead of looping.
-    pub fn run(&self, m: &mut dyn Completer, seed: &str) -> Outcome {
+    pub fn run<M: Completer + ?Sized>(&self, m: &M, seed: &str) -> Outcome {
         let mut prompt = initial_prompt(seed, self.report_language);
         let mut errors = 0u32;
         let mut last = String::new();
@@ -83,6 +94,88 @@ impl ReAct {
             }
         }
         Outcome::Partial(partial(&last, "step_cap_reached"))
+    }
+}
+
+/// Run independent Reduce batches across at most `max_parallel` workers.
+///
+/// Batches are independent evidence, so they may overlap; the returned list is
+/// ordered by batch index no matter which batch finishes first, which keeps the
+/// merged report byte-stable. Progress is written to stderr because a full
+/// audit can queue dozens of batches.
+pub fn run_batches<C: Completer + ?Sized>(
+    completer: &C,
+    batches: &[String],
+    language: ReportLanguage,
+    max_parallel: usize,
+) -> Vec<(usize, Outcome)> {
+    let workers = max_parallel.max(1).min(batches.len());
+    let mut results: Vec<(usize, Outcome)> = Vec::with_capacity(batches.len());
+    if workers <= 1 {
+        for (idx, seed) in batches.iter().enumerate() {
+            log_batch_started(idx, batches.len(), seed.len());
+            let outcome = ReAct::with_language(language).run(completer, seed);
+            log_batch_outcome(idx, batches.len(), &outcome);
+            results.push((idx, outcome));
+        }
+        return results;
+    }
+
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<Outcome>>> = batches.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(seed) = batches.get(idx) else {
+                        break;
+                    };
+                    log_batch_started(idx, batches.len(), seed.len());
+                    let outcome = ReAct::with_language(language).run(completer, seed);
+                    log_batch_outcome(idx, batches.len(), &outcome);
+                    if let Some(slot) = slots.get(idx)
+                        && let Ok(mut slot) = slot.lock()
+                    {
+                        *slot = Some(outcome);
+                    }
+                }
+            });
+        }
+    });
+
+    results.extend(slots.into_iter().enumerate().filter_map(|(idx, slot)| {
+        slot.into_inner()
+            .ok()
+            .flatten()
+            .map(|outcome| (idx, outcome))
+    }));
+    debug_assert_eq!(
+        results.len(),
+        batches.len(),
+        "every Reduce batch must report an outcome"
+    );
+    results
+}
+
+fn log_batch_started(idx: usize, total: usize, seed_bytes: usize) {
+    eprintln!(
+        "large-model Reduce batch {}/{} started, seed_bytes: {seed_bytes}",
+        idx + 1,
+        total
+    );
+}
+
+fn log_batch_outcome(idx: usize, total: usize, outcome: &Outcome) {
+    match outcome {
+        Outcome::Final(_) => eprintln!("large-model Reduce batch {}/{} complete", idx + 1, total),
+        Outcome::Partial(report) => {
+            eprintln!(
+                "partial result in Reduce batch {}/{}: {report}",
+                idx + 1,
+                total
+            );
+        }
     }
 }
 
@@ -152,36 +245,36 @@ fn parse_call(json: &str) -> Option<(Skill, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU8, AtomicUsize};
+    use std::time::{Duration, Instant};
 
     struct Fake {
-        seq: RefCell<Vec<Result<String, CallError>>>,
+        seq: Mutex<Vec<Result<String, CallError>>>,
     }
     impl Fake {
         fn new(mut v: Vec<Result<String, CallError>>) -> Self {
             v.reverse();
-            Self {
-                seq: RefCell::new(v),
-            }
+            Self { seq: Mutex::new(v) }
         }
     }
     impl Completer for Fake {
-        fn ask(&mut self, _: &str) -> Result<String, CallError> {
-            self.seq
-                .borrow_mut()
-                .pop()
-                .unwrap_or(Err(CallError::Network))
+        fn ask(&self, _: &str) -> Result<String, CallError> {
+            let Ok(mut seq) = self.seq.lock() else {
+                return Err(CallError::Network);
+            };
+            seq.pop().unwrap_or(Err(CallError::Network))
         }
     }
 
     #[test]
     fn tool_call_then_final_converges() {
-        let mut f = Fake::new(vec![
+        let f = Fake::new(vec![
             Ok("<TOOL_CALL>{\"skill\":\"coarse_filter\",\"input\":\"x\"}</TOOL_CALL>".into()),
             Ok("<FINAL>risk: none</FINAL>".into()),
         ]);
         assert_eq!(
-            ReAct::default().run(&mut f, "seed"),
+            ReAct::default().run(&f, "seed"),
             Outcome::Final("risk: none".into())
         );
     }
@@ -213,12 +306,12 @@ mod tests {
     #[test]
     fn seed_alias_feeds_tool_observation() {
         struct Probe {
-            step: u8,
+            step: AtomicU8,
         }
         impl Completer for Probe {
-            fn ask(&mut self, prompt: &str) -> Result<String, CallError> {
-                self.step += 1;
-                if self.step == 1 {
+            fn ask(&self, prompt: &str) -> Result<String, CallError> {
+                let step = self.step.fetch_add(1, Ordering::Relaxed);
+                if step == 0 {
                     return Ok(
                         "<TOOL_CALL>{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}</TOOL_CALL>"
                             .into(),
@@ -231,49 +324,143 @@ mod tests {
 
         let seed =
             r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
-        let mut p = Probe { step: 0 };
-        assert_eq!(
-            ReAct::new(2, 1).run(&mut p, seed),
-            Outcome::Final("ok".into())
-        );
+        let p = Probe {
+            step: AtomicU8::new(0),
+        };
+        assert_eq!(ReAct::new(2, 1).run(&p, seed), Outcome::Final("ok".into()));
     }
 
     #[test]
     fn unknown_skill_trips_to_partial() {
-        let mut f = Fake::new(vec![Ok(
+        let f = Fake::new(vec![Ok(
             "<TOOL_CALL>{\"skill\":\"rm\",\"input\":\"x\"}</TOOL_CALL>".into(),
         )]);
-        assert!(matches!(
-            ReAct::new(8, 1).run(&mut f, "s"),
-            Outcome::Partial(_)
-        ));
+        assert!(matches!(ReAct::new(8, 1).run(&f, "s"), Outcome::Partial(_)));
     }
 
     #[test]
     fn bad_json_trips_to_partial() {
-        let mut f = Fake::new(vec![Ok("<TOOL_CALL>not json</TOOL_CALL>".into())]);
-        assert!(matches!(
-            ReAct::new(8, 1).run(&mut f, "s"),
-            Outcome::Partial(_)
-        ));
+        let f = Fake::new(vec![Ok("<TOOL_CALL>not json</TOOL_CALL>".into())]);
+        assert!(matches!(ReAct::new(8, 1).run(&f, "s"), Outcome::Partial(_)));
     }
 
     #[test]
     fn model_error_yields_partial() {
-        let mut f = Fake::new(vec![Err(CallError::Tripped)]);
-        assert!(matches!(
-            ReAct::default().run(&mut f, "s"),
-            Outcome::Partial(_)
-        ));
+        let f = Fake::new(vec![Err(CallError::Tripped)]);
+        assert!(matches!(ReAct::default().run(&f, "s"), Outcome::Partial(_)));
     }
 
     #[test]
     fn step_cap_returns_partial_not_hang() {
         let loop_call = "<TOOL_CALL>{\"skill\":\"converge\",\"input\":\"x\"}</TOOL_CALL>";
-        let mut f = Fake::new((0..50).map(|_| Ok(loop_call.into())).collect());
-        assert!(matches!(
-            ReAct::new(3, 3).run(&mut f, "s"),
-            Outcome::Partial(_)
-        ));
+        let f = Fake::new((0..50).map(|_| Ok(loop_call.into())).collect());
+        assert!(matches!(ReAct::new(3, 3).run(&f, "s"), Outcome::Partial(_)));
+    }
+
+    /// Answers each batch with its own index after a per-index delay, so tests can
+    /// force completion order to differ from batch order.
+    struct TimedFinal {
+        calls: AtomicUsize,
+        delay_ms: fn(usize) -> u64,
+    }
+
+    impl Completer for TimedFinal {
+        fn ask(&self, prompt: &str) -> Result<String, CallError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let idx = batch_index(prompt);
+            std::thread::sleep(Duration::from_millis((self.delay_ms)(idx)));
+            Ok(format!("<FINAL>batch-{idx}</FINAL>"))
+        }
+    }
+
+    fn batch_index(prompt: &str) -> usize {
+        prompt
+            .split("BATCH_INDEX:")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|idx| idx.parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn batches(total: usize) -> Vec<String> {
+        (0..total).map(|idx| format!("BATCH_INDEX:{idx}")).collect()
+    }
+
+    #[test]
+    fn run_batches_overlaps_work_across_workers() {
+        let completer = TimedFinal {
+            calls: AtomicUsize::new(0),
+            delay_ms: |_| 150,
+        };
+        let started = Instant::now();
+        let results = run_batches(&completer, &batches(4), ReportLanguage::En, 4);
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            results.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(completer.calls.load(Ordering::Relaxed), 4);
+        assert!(
+            elapsed < Duration::from_millis(450),
+            "4 x 150ms batches on 4 workers must overlap, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_batches_returns_batch_order_not_completion_order() {
+        // Batch 0 is slowest and batch 3 fastest: completion order is reversed.
+        let completer = TimedFinal {
+            calls: AtomicUsize::new(0),
+            delay_ms: |idx| (4u64.saturating_sub(idx as u64)) * 40,
+        };
+        let results = run_batches(&completer, &batches(4), ReportLanguage::En, 4);
+
+        assert_eq!(
+            results.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        for (idx, outcome) in &results {
+            assert_eq!(*outcome, Outcome::Final(format!("batch-{idx}")));
+        }
+    }
+
+    #[test]
+    fn run_batches_with_one_worker_stays_serial() {
+        let completer = TimedFinal {
+            calls: AtomicUsize::new(0),
+            delay_ms: |_| 100,
+        };
+        let started = Instant::now();
+        let results = run_batches(&completer, &batches(3), ReportLanguage::En, 1);
+        let elapsed = started.elapsed();
+
+        assert_eq!(results.len(), 3);
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "one worker must run batches one after another, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_batches_reports_partial_without_dropping_other_batches() {
+        struct Flaky {
+            fail_at: usize,
+        }
+        impl Completer for Flaky {
+            fn ask(&self, prompt: &str) -> Result<String, CallError> {
+                let idx = batch_index(prompt);
+                if idx == self.fail_at {
+                    return Err(CallError::Network);
+                }
+                Ok(format!("<FINAL>batch-{idx}</FINAL>"))
+            }
+        }
+
+        let results = run_batches(&Flaky { fail_at: 1 }, &batches(4), ReportLanguage::En, 4);
+        assert_eq!(results.len(), 4);
+        assert!(matches!(results[1].1, Outcome::Partial(_)));
+        assert_eq!(results[0].1, Outcome::Final("batch-0".into()));
+        assert_eq!(results[3].1, Outcome::Final("batch-3".into()));
     }
 }

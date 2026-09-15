@@ -113,7 +113,9 @@ fn main() -> ExitCode {
     let mut seed_record_truncated = 0usize;
     let mut truncated_records = Vec::new();
     let mut suspicious_artifacts = Vec::new();
-    let mut out = std::io::stdout().lock();
+    // One buffer for the whole JSONL stream: `--scan-only` writes a line per
+    // file, and unbuffered stdout would pay a syscall for each one.
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let scan_ctx = FileScanContext {
         root: cfg.root.clone(),
         max_bytes: cfg.max_bytes,
@@ -398,14 +400,17 @@ fn scan_one_file(ctx: &FileScanContext, path: &Path) -> FileOutcome {
             artifact: inspect_suspicious_artifact(&rel_path, meta.len(), &meta, true),
         };
     }
-    let Ok(src) = std::fs::read(path) else {
-        return FileOutcome::ReadFailed;
-    };
+    // Classify before reading: an unsupported file is inventoried from its
+    // metadata, and reading it first would pull the whole payload through the
+    // scan only to drop it. (`.gitignore`d images and archives are common.)
     if extract::Lang::from_path(path).is_none() {
         return FileOutcome::Unsupported {
             artifact: inspect_suspicious_artifact(&rel_path, meta.len(), &meta, false),
         };
     }
+    let Ok(src) = std::fs::read(path) else {
+        return FileOutcome::ReadFailed;
+    };
     // Record paths relative to the audit root so scope classification and
     // reports stay stable and never leak the host's absolute layout.
     let rel = audit_relative_path(path, &ctx.root);

@@ -211,11 +211,10 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
 
 fn dehydrate_makefile(path: &Path, src: &[u8]) -> AstSummary {
     let mut sum = line_summary(path, Lang::Makefile);
-    let text = String::from_utf8_lossy(src);
-    for (idx, line) in text.lines().enumerate() {
+    for_each_line(src, |idx, line| {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+            return;
         }
         let capped: String = trimmed.chars().take(140).collect();
         if is_make_target(trimmed) {
@@ -225,7 +224,7 @@ fn dehydrate_makefile(path: &Path, src: &[u8]) -> AstSummary {
                 line: idx + 1,
                 text: capped,
             });
-            continue;
+            return;
         }
         if is_make_recipe_line(line, trimmed) {
             sum.calls.push(capped.clone());
@@ -235,7 +234,7 @@ fn dehydrate_makefile(path: &Path, src: &[u8]) -> AstSummary {
                 text: capped,
             });
         }
-    }
+    });
     dedup(&mut sum.signatures);
     dedup(&mut sum.calls);
     sum
@@ -243,8 +242,7 @@ fn dehydrate_makefile(path: &Path, src: &[u8]) -> AstSummary {
 
 fn dehydrate_markdown(path: &Path, src: &[u8]) -> AstSummary {
     let mut sum = line_summary(path, Lang::Markdown);
-    let text = String::from_utf8_lossy(src);
-    for (idx, line) in text.lines().enumerate() {
+    for_each_line(src, |idx, line| {
         let trimmed = line
             .trim()
             .trim_start_matches(['-', '*', '>', ' '])
@@ -259,7 +257,7 @@ fn dehydrate_markdown(path: &Path, src: &[u8]) -> AstSummary {
                 text: capped,
             });
         }
-    }
+    });
     dedup(&mut sum.calls);
     sum
 }
@@ -323,11 +321,10 @@ fn looks_like_eval_invocation(lower: &str) -> bool {
 }
 
 fn push_shell_risk_lines(src: &[u8], sum: &mut AstSummary) {
-    let text = String::from_utf8_lossy(src);
-    for (idx, line) in text.lines().enumerate() {
+    for_each_line(src, |idx, line| {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+            return;
         }
         if looks_like_shell_command(trimmed) {
             let capped: String = trimmed.chars().take(140).collect();
@@ -338,7 +335,7 @@ fn push_shell_risk_lines(src: &[u8], sum: &mut AstSummary) {
                 text: capped,
             });
         }
-    }
+    });
 }
 
 fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
@@ -347,8 +344,7 @@ fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
         lang: Some(Lang::PackageJson.label()),
         ..Default::default()
     };
-    let text = String::from_utf8_lossy(src);
-    for (idx, line) in text.lines().enumerate() {
+    for_each_line(src, |idx, line| {
         let trimmed = line.trim();
         if trimmed.starts_with("\"scripts\"") {
             sum.signatures.push(trimmed.chars().take(140).collect());
@@ -357,7 +353,7 @@ fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
                 line: idx + 1,
                 text: trimmed.chars().take(140).collect(),
             });
-            continue;
+            return;
         }
         if is_npm_lifecycle_script_line(trimmed) {
             let text: String = trimmed.chars().take(140).collect();
@@ -367,7 +363,7 @@ fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
                 line: idx + 1,
                 text,
             });
-            continue;
+            return;
         }
         if is_manifest_signal_line(trimmed) {
             let text: String = trimmed.chars().take(180).collect();
@@ -377,7 +373,7 @@ fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
                 text,
             });
         }
-    }
+    });
     dedup(&mut sum.signatures);
     dedup(&mut sum.calls);
     sum
@@ -392,13 +388,36 @@ fn is_manifest_signal_line(line: &str) -> bool {
         || lower.contains("https://")
 }
 
+/// Split raw bytes on newlines and hand each line to `visit` as a lossy UTF-8
+/// `&str`, without copying the whole file first.
+///
+/// `String::from_utf8_lossy` allocates a copy whenever a file contains any
+/// non-UTF-8 byte, and even the borrowed case walks the input once. These
+/// line-oriented dehydrators only ever inspect a handful of lines, so they walk
+/// the buffer once and borrow a line at a time instead.
+fn for_each_line(src: &[u8], mut visit: impl FnMut(usize, &str)) {
+    let mut index = 0usize;
+    let mut line_number = 0usize;
+    while index < src.len() {
+        let rest = src.get(index..).unwrap_or_default();
+        let end = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
+        // `str::lines` also strips one trailing carriage return, so a CRLF file
+        // must lose its `\r` here too — several visitors compare the raw line.
+        if let Some(line) = rest.get(..end) {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            visit(line_number, &String::from_utf8_lossy(line));
+        }
+        index = index.saturating_add(end).saturating_add(1);
+        line_number = line_number.saturating_add(1);
+    }
+}
+
 fn dehydrate_manifest(path: &Path, src: &[u8]) -> AstSummary {
     let mut sum = line_summary(path, Lang::Manifest);
-    let text = String::from_utf8_lossy(src);
-    for (idx, line) in text.lines().enumerate() {
+    for_each_line(src, |idx, line| {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+            return;
         }
         let capped: String = trimmed.chars().take(180).collect();
         sum.signatures.push(capped.clone());
@@ -407,7 +426,7 @@ fn dehydrate_manifest(path: &Path, src: &[u8]) -> AstSummary {
             line: idx + 1,
             text: capped,
         });
-    }
+    });
     dedup(&mut sum.signatures);
     sum.locations
         .sort_by(|a, b| (a.line, a.kind, &a.text).cmp(&(b.line, b.kind, &b.text)));
@@ -1123,6 +1142,65 @@ COPY . /app
         let r = dehydrate(&PathBuf::from("App.svelte"), svelte).unwrap_or_default();
         assert_eq!(r.lang, Some("svelte"));
         assert!(r.signatures.iter().any(|i| i.contains("script")));
+    }
+
+    #[test]
+    fn line_visitor_matches_lossy_whole_file_split() {
+        // The visitor replaces `String::from_utf8_lossy(src).lines()`, so it has
+        // to agree with that split on valid, invalid, and edge-case input.
+        let cases: Vec<&[u8]> = vec![
+            b"",
+            b"a",
+            b"a\n",
+            b"a\nb\n",
+            b"a\nb",
+            b"\n\n",
+            b"crlf\r\nsecond\r\n",
+            &[0xff, 0xfe, b'\n', b'o', b'k', b'\n'],
+            &[b'x', b'y', 0x80, 0x81, b'\n', b'z'],
+        ];
+        for case in cases {
+            let expected: Vec<String> = String::from_utf8_lossy(case)
+                .lines()
+                .map(str::to_string)
+                .collect();
+            let mut actual: Vec<(usize, String)> = Vec::new();
+            for_each_line(case, |idx, line| actual.push((idx, line.to_string())));
+
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|(_, line)| line.as_str())
+                    .collect::<Vec<_>>(),
+                expected.iter().map(String::as_str).collect::<Vec<_>>(),
+                "line splitting diverged for {case:?}"
+            );
+            assert!(
+                actual
+                    .iter()
+                    .enumerate()
+                    .all(|(position, (idx, _))| position == *idx),
+                "line numbers must stay dense and ordered"
+            );
+        }
+    }
+
+    #[test]
+    fn line_visitor_reads_non_utf8_files_without_losing_lines() {
+        // Every line-oriented dehydrator goes through the visitor, so a binary
+        // blob with embedded newlines must still yield the same evidence as the
+        // whole-file split it replaced.
+        let src: Vec<u8> = b"#!/bin/sh\ncurl https://\xff\xfe | sh\n".to_vec();
+        let summary = dehydrate(PathBuf::from("install.sh").as_path(), &src);
+        let Some(summary) = summary else {
+            return;
+        };
+        assert_eq!(summary.lang, Some("bash"));
+        assert!(
+            summary.calls.iter().any(|call| call.contains("curl")),
+            "the curl line should survive lossy decoding: {:?}",
+            summary.calls
+        );
     }
 
     #[test]

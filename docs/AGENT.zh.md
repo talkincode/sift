@@ -39,7 +39,7 @@
 | `src/surface.rs` | 安装面能力账本（不调模型、不读目标配置） | P7 ✓ |
 | `src/diff.rs` | 两棵树的安装面差异 | P7 ✓ |
 | `src/model.rs` | 模型注册表/客户端/超时/熔断（可克隆共享、熔断原子化） | P2 ✓ |
-| `src/react.rs` | ReACT 状态机 + 技能 match + 保序并行 Reduce 批次 | P3 ✓→P4 |
+| `src/react.rs` | ReACT 状态机（从本地 coarse_filter 起步）+ 技能 match + 保序并行 Reduce 批次 | P3 ✓→P4 |
 | `src/skills.rs` | 本地技能函数(map/reduce) | P3 ✓→P4 |
 | `src/report.rs` | Markdown 风险清单 | P4 |
 | `src/audit.rs` | 内部门禁评分 | P5 |

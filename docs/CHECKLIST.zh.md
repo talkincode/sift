@@ -9,8 +9,8 @@
 
 | | |
 |---|---|
-| 提交 | `cac0226` —「perf(scan): stop reading files the scan cannot use, and borrow lines instead of copying them (#5)」，外加本次会话的 Reduce 成本核算改动（`src/react.rs`、`src/main.rs`） |
-| 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
+| 提交 | `1813d4c` —「fix(benchmark): budget the Reduce prompts that are actually sent (#6)」，外加本次会话的 Reduce 入口改动（`src/react.rs`、`src/main.rs`、`tests/full_audit_mock.rs`） |
+| 评估日期 | 2026-09-16 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce（并行批次、成本核算、入口）、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
 | 测试 | ✅ 198 个通过，0 个失败（`src/**` 内 158 个单测 + `tests/*.rs` 内 40 个黑盒测试） |
@@ -129,6 +129,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | 9 | G | `--module` 审计限定在项目根内，不串到全局 | ✅ 完成 | 测试 `absolute_module_must_stay_inside_target`、`absolute_module_inside_target_is_allowed`；internal-gate PASS「Module path is contained by project root」 |
 | 10 | G | fake-endpoint 完整审计 smoke 证明用户路径可用 | ✅ 完成 | `tests/full_audit_mock.rs` 在 `127.0.0.1:0` 起一个本地 OpenAI 兼容 mock，把隔离的 `~/.sift/config.toml` 指向它，并用真实二进制跑通默认的纯 Reduce 路径：请求 5 个批次、峰值 4 个在途、退出码 0、stdout 有收敛表格行。取代了人工证据 `reports/full-audit-local-model-test.md`（该报告早于 small-model Map 默认不激活的行为） |
 | 11 | F | 互不依赖的 Reduce 批次最多按 `concurrency` 并行（模型侧封顶 8），并按批序合并 | ✅ 完成 | `react::run_batches` + `react::MAX_REDUCE_PARALLEL`；`ModelClient` 克隆共享同一个 `Arc<dyn Transport>` 与同一个原子熔断器（`clones_share_one_breaker`）。单测 `run_batches_overlaps_work_across_workers`、`run_batches_returns_batch_order_not_completion_order`、`run_batches_with_one_worker_stays_serial`、`run_batches_reports_partial_without_dropping_other_batches`；`tests/full_audit_mock.rs` 端到端证明并发 |
+| 12 | F | Reduce 从本地确定性发现起步；原始 seed 从不发给模型 | ✅ 完成 | `ReAct::run` 先跑 `Skill::CoarseFilter`，再从 observation prompt 起步（`run_opens_on_the_deterministic_observation_not_the_seed` 断言首个 prompt 是 `OBSERVATION:` 且不含 seed；`tool_calls_still_resolve_the_seed_alias` 保证 `$SEED` 协议仍可用）。用记录每个请求体的 mock 端点实测：每批次请求数 2 → 1，RAM-TA3 发送量 8,380,731 → 653,360 字节（少 11.6 倍）、TeamsACS 6,563,884 → 513,093、sift 271,778 → 24,504。审计报告在 `Diagnostics` 中披露该入口 |
 
 ### P4b — Agent gate 与 policy
 
@@ -148,7 +149,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 
 | # | Type | 条目 | 状态 | 证据 |
 |---|---|------|------|------|
-| 1 | F | `--benchmark` 本地 telemetry（不调用模型；可选 USD 成本估算） | ✅ 完成 | `tests/benchmark_mode.rs`（3/3 通过）。输入 token 现在来自 `react::planned_prompts`（每批次两轮 Reduce prompt），而不是 `seed_bytes / 4`——后者相对服务商实际计费的字节数低估约 10%（用记录每个请求体的 mock 端点实测：RAM-TA3 上 planned 8,429,346 vs 实际发送 8,380,731）。`tests/full_audit_mock.rs` 固定该契约：`planned_requests` 等于实际请求数，且 `planned_prompt_bytes` 覆盖实际发送量、超出不超过 10% |
+| 1 | F | `--benchmark` 本地 telemetry（不调用模型；可选 USD 成本估算） | ✅ 完成 | `tests/benchmark_mode.rs`（3/3 通过）。输入 token 来自 `react::planned_prompts`：Reduce 阶段实际发送的 observation prompt，每批次一个（RAM-TA3 planned 653,688 vs 实发 653,360）。`tests/full_audit_mock.rs` 用记录每个请求体的 mock 端点固定该契约：`planned_requests` 等于实际请求数、`planned_prompt_bytes` 覆盖实发量且超出不超过 10%、且发送量远低于 seed |
 | 2 | F | `sift github owner/repo` 安全 intake——绝不 build/install/跑 hook/碰 submodule；扫描前检查文件/字节上限、`.gitmodules`、Git LFS | ✅ 完成 | `run_github_intake`、`parse_github_repo`、`inspect_checkout_dir`；测试 `github_repo_parser_accepts_owner_repo_and_https`、`checkout_inspection_reports_lfs_and_limits`、`github_intake_rejects_non_github_url_without_network`（黑盒）。`git` fetch 与递归调用本地 `sift` 均跑在 `run_command_with_timeout` 之下（120s / 600s 硬 deadline，超时即 kill） |
 | 3 | F | `sift doctor`——配置/密钥/端点诊断 | ✅ 完成 | `tests/doctor.rs` 每个用例都用独立的临时 `HOME` 跑真实二进制：健康配置（PASS 行，含 `permissions 600`）、非法 TOML（FAIL + 退出 1）、配置缺失（创建不含密钥的默认配置、WARN、退出 0）、权限 644（仅告警）、本地端点无 Key（PASS，无需鉴权）、公网端点缺 `key_env`（FAIL + 退出 1）、Azure 风格 Key 配 `api.openai.com`（FAIL + 401 警告），以及 Key 值绝不出现在 stdout/stderr |
 | 4 | F | `--save`/`--save-to` 持久化报告（`reports/sift-audit-result-YYYYMMDD-NNN.md`） | ✅ 完成 | `main.rs` 中 `save_audit_result`、`next_audit_result_path`、`utc_yyyymmdd`、`civil_from_days` |

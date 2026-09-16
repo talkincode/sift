@@ -221,7 +221,8 @@ fn full_audit_overlaps_reduce_batches_against_a_mock_endpoint() {
         "the converged model report should reach stdout\nstdout:\n{stdout}"
     );
 
-    // The budget the tool reports must cover what the provider is billed for.
+    // The Reduce stage opens on the deterministic findings, so the raw seed
+    // never reaches the endpoint: that is where the input cost went.
     let benchmark = run_sift(
         &home,
         &[repo.display().to_string(), "--benchmark".to_string()],
@@ -243,6 +244,18 @@ fn full_audit_overlaps_reduce_batches_against_a_mock_endpoint() {
     assert!(
         planned_bytes as usize <= sent_bytes.saturating_mul(110) / 100,
         "the estimate ({planned_bytes}) overstates what was sent ({sent_bytes}) by more than 10%"
+    );
+
+    // The headline: one request per batch, and the seed stays local.
+    let seed_bytes = report["seed"]["bytes_sent"].as_u64().unwrap_or(0);
+    assert_eq!(
+        requests,
+        report["seed"]["reduce_batches"].as_u64().unwrap_or(0) as usize,
+        "each batch must cost exactly one request"
+    );
+    assert!(
+        sent_bytes.saturating_mul(5) < seed_bytes as usize,
+        "the payload sent ({sent_bytes}) should be far below the seed ({seed_bytes})"
     );
 
     fs::remove_dir_all(&home).ok();

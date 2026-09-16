@@ -34,7 +34,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 ## Project Profile (target state)
 
 - **Zero-friction cold start.** `sift ./repo --scan-only` just runs; missing `~/.sift/config.toml` is created with non-secret defaults; no interactive prompts; exits with an injection hint if the key is missing.
-- **Cost-controlled & budgetable.** The deterministic baseline is local; the large model only sees the dehydrated skeleton when full audit is requested.
+- **Cost-controlled & budgetable.** The deterministic baseline is local; the large model only sees the dehydrated skeleton when full audit is requested. `--benchmark` budgets from the Reduce prompts the audit would actually send — every batch's seed turn plus its deterministic observation turn — instead of from the seed alone, which understated input by ~10% on the repos measured.
 - **Model orchestration.** A ReACT state machine chains deterministic findings and large-model convergence; skills are compile-time local functions.
 - **Multi-model + concurrency.** Multiple endpoints are configurable; the scan fans per-file dehydration out over `concurrency` workers and consumes the results in walk order, and the independent Reduce batches overlap over that same cap (model side capped at 8). Both stages merge in index order, so streams and reports stay byte-stable; scan/model concurrency remains bounded and observable.
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.

@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `a3e53e3` —「test: cover doctor, the missing-key gate, and the gate check's own scoping (#4)」，外加本次会话的扫描 I/O 改动（`src/main.rs`、`src/extract.rs`） |
+| 提交 | `cac0226` —「perf(scan): stop reading files the scan cannot use, and borrow lines instead of copying them (#5)」，外加本次会话的 Reduce 成本核算改动（`src/react.rs`、`src/main.rs`） |
 | 评估日期 | 2026-09-15 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 196 个通过，0 个失败（`src/**` 内 156 个单测 + `tests/*.rs` 内 40 个黑盒测试） |
+| 测试 | ✅ 198 个通过，0 个失败（`src/**` 内 158 个单测 + `tests/*.rs` 内 40 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -148,7 +148,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 
 | # | Type | 条目 | 状态 | 证据 |
 |---|---|------|------|------|
-| 1 | F | `--benchmark` 本地 telemetry（不调用模型；可选 USD 成本估算） | ✅ 完成 | `tests/benchmark_mode.rs`（3/3 通过） |
+| 1 | F | `--benchmark` 本地 telemetry（不调用模型；可选 USD 成本估算） | ✅ 完成 | `tests/benchmark_mode.rs`（3/3 通过）。输入 token 现在来自 `react::planned_prompts`（每批次两轮 Reduce prompt），而不是 `seed_bytes / 4`——后者相对服务商实际计费的字节数低估约 10%（用记录每个请求体的 mock 端点实测：RAM-TA3 上 planned 8,429,346 vs 实际发送 8,380,731）。`tests/full_audit_mock.rs` 固定该契约：`planned_requests` 等于实际请求数，且 `planned_prompt_bytes` 覆盖实际发送量、超出不超过 10% |
 | 2 | F | `sift github owner/repo` 安全 intake——绝不 build/install/跑 hook/碰 submodule；扫描前检查文件/字节上限、`.gitmodules`、Git LFS | ✅ 完成 | `run_github_intake`、`parse_github_repo`、`inspect_checkout_dir`；测试 `github_repo_parser_accepts_owner_repo_and_https`、`checkout_inspection_reports_lfs_and_limits`、`github_intake_rejects_non_github_url_without_network`（黑盒）。`git` fetch 与递归调用本地 `sift` 均跑在 `run_command_with_timeout` 之下（120s / 600s 硬 deadline，超时即 kill） |
 | 3 | F | `sift doctor`——配置/密钥/端点诊断 | ✅ 完成 | `tests/doctor.rs` 每个用例都用独立的临时 `HOME` 跑真实二进制：健康配置（PASS 行，含 `permissions 600`）、非法 TOML（FAIL + 退出 1）、配置缺失（创建不含密钥的默认配置、WARN、退出 0）、权限 644（仅告警）、本地端点无 Key（PASS，无需鉴权）、公网端点缺 `key_env`（FAIL + 退出 1）、Azure 风格 Key 配 `api.openai.com`（FAIL + 401 警告），以及 Key 值绝不出现在 stdout/stderr |
 | 4 | F | `--save`/`--save-to` 持久化报告（`reports/sift-audit-result-YYYYMMDD-NNN.md`） | ✅ 完成 | `main.rs` 中 `save_audit_result`、`next_audit_result_path`、`utc_yyyymmdd`、`civil_from_days` |

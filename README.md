@@ -146,6 +146,14 @@ sift ./repo --benchmark \
   --benchmark-estimated-output-tokens 2000
 ```
 
+The input estimate counts the Reduce prompts the audit would actually send, not
+just the seed. Each batch costs a seed turn plus, once the model asks for the
+local `coarse_filter`, an observation turn carrying the deterministic findings,
+so `tokens.planned_prompt_bytes` covers both and `tokens.seed_prompt_bytes` is
+the floor for a model that answers `<FINAL>` immediately. Counting the
+observation turns runs that local filter, which is why benchmark mode costs a
+fraction of a second more than the scan alone; it still makes no model calls.
+
 ## Supported Languages
 
 The scan layer currently dehydrates Rust, Python, Go, JavaScript, TypeScript/TSX,

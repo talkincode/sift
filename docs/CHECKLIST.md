@@ -13,11 +13,11 @@
 
 | | |
 |---|---|
-| Commit | `a3e53e3` — "test: cover doctor, the missing-key gate, and the gate check's own scoping (#4)", plus this session's scan I/O change (`src/main.rs`, `src/extract.rs`) |
+| Commit | `cac0226` — "perf(scan): stop reading files the scan cannot use, and borrow lines instead of copying them (#5)", plus this session's Reduce cost-accounting change (`src/react.rs`, `src/main.rs`) |
 | Date assessed | 2026-09-15 — build, tests, gate, the P0/P1 scan rows, and the P4a/P4c rows for Reduce, `doctor`, and the missing-key gate were re-verified this session; phase rows not touched by this session were audited at `f9a374b` and are carried forward unchanged |
 | `cargo build` | ✅ pass |
 | `make ci` (`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`) | ✅ pass, exit 0 |
-| Tests | ✅ 196 passed, 0 failed (156 unit tests in `src/**` + 40 black-box tests in `tests/*.rs`) |
+| Tests | ✅ 198 passed, 0 failed (158 unit tests in `src/**` + 40 black-box tests in `tests/*.rs`) |
 | Internal quality gate (`reports/internal-gate.md`) | ✅ 14/14 checks PASS, 0 WARN, 0 FAIL |
 
 ## Legend
@@ -152,7 +152,7 @@ ROADMAP status: **not marked done**; README self-reports "in progress." This is 
 
 | # | Type | Item | Status | Evidence |
 |---|---|------|--------|----------|
-| 1 | F | `--benchmark` local telemetry (no model calls; optional USD cost estimate) | ✅ Done | `tests/benchmark_mode.rs` (3/3 passing) |
+| 1 | F | `--benchmark` local telemetry (no model calls; optional USD cost estimate) | ✅ Done | `tests/benchmark_mode.rs` (3/3 passing). Input tokens now come from `react::planned_prompts` — both Reduce turns per batch — instead of `seed_bytes / 4`, which understated the bytes a provider bills by ~10% (measured against a mock endpoint recording every request body: planned 8,429,346 vs sent 8,380,731 on RAM-TA3). `tests/full_audit_mock.rs` pins the contract: `planned_requests` equals the requests made, and `planned_prompt_bytes` covers what was sent without overshooting by more than 10% |
 | 2 | F | `sift github owner/repo` safe intake — never builds, installs, runs hooks, or touches submodules; inspects file/byte limits, `.gitmodules`, Git LFS before scanning | ✅ Done | `run_github_intake`, `parse_github_repo`, `inspect_checkout_dir`; tests `github_repo_parser_accepts_owner_repo_and_https`, `checkout_inspection_reports_lfs_and_limits`, `github_intake_rejects_non_github_url_without_network` (black-box). Both `git` fetch and the recursive local `sift` invocation run under `run_command_with_timeout` (120s / 600s hard deadlines with kill-on-timeout) |
 | 3 | F | `sift doctor` — config/key/endpoint diagnostics | ✅ Done | `tests/doctor.rs` runs the real binary against a throwaway `HOME` per case: healthy config (PASS rows incl. `permissions 600`), invalid TOML (FAIL + exit 1), absent config (creates a secret-free default, WARN, exit 0), mode 644 (advisory WARN), local endpoint without a key (PASS, no auth needed), public endpoint without its `key_env` (FAIL + exit 1), Azure-shaped key against `api.openai.com` (FAIL + 401 warning), and a key value that must never appear in stdout or stderr |
 | 4 | F | `--save`/`--save-to` persisted reports (`reports/sift-audit-result-YYYYMMDD-NNN.md`) | ✅ Done | `save_audit_result`, `next_audit_result_path`, `utc_yyyymmdd`, `civil_from_days` in `main.rs` |

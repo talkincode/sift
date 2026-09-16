@@ -64,10 +64,17 @@ impl ReAct {
     }
 
     /// Run until <FINAL>; bounded steps/errors return a partial result instead of looping.
+    ///
+    /// The loop opens on the deterministic coarse-filter observation, not on the
+    /// raw seed. The seed turn existed only so the model could ask for a filter
+    /// this loop runs locally anyway, and it cost ~92% of the Reduce input
+    /// bytes; the model still sees the same authoritative findings, one request
+    /// per batch instead of two.
     pub fn run<M: Completer + ?Sized>(&self, m: &M, seed: &str) -> Outcome {
-        let mut prompt = initial_prompt(seed, self.report_language);
+        let observation = Skill::CoarseFilter.run_with_language(seed, self.report_language);
+        let mut last = observation.clone();
+        let mut prompt = observation_prompt(&observation, self.report_language);
         let mut errors = 0u32;
-        let mut last = String::new();
         for _ in 0..self.max_steps {
             let reply = match m.ask(&prompt) {
                 Ok(r) => r,
@@ -158,9 +165,11 @@ pub fn run_batches<C: Completer + ?Sized>(
     results
 }
 
-fn log_batch_started(idx: usize, total: usize, seed_bytes: usize) {
+fn log_batch_started(idx: usize, total: usize, evidence_bytes: usize) {
+    // The batch's evidence size, not the prompt size: the loop sends the
+    // deterministic observation built from it, and never the raw seed.
     eprintln!(
-        "large-model Reduce batch {}/{} started, seed_bytes: {seed_bytes}",
+        "large-model Reduce batch {}/{} started, evidence_bytes: {evidence_bytes}",
         idx + 1,
         total
     );
@@ -179,60 +188,43 @@ fn log_batch_outcome(idx: usize, total: usize, outcome: &Outcome) {
     }
 }
 
-/// Prompt bytes one converging batch costs, before any model is called.
+/// Prompt bytes a Reduce run costs, before any model is called.
 ///
-/// The Reduce loop sends the seed first and, once the model asks for the local
-/// coarse filter, sends the deterministic findings back as an observation. Both
-/// prompts are built locally, so a budget can count them exactly instead of
-/// guessing from the seed alone.
+/// The loop opens on the deterministic coarse-filter observation, so one batch
+/// is one request. A model that asks for extra tool calls sends more; nothing
+/// sends the raw seed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PlannedPrompts {
-    /// Seed prompts for every batch (always sent).
-    pub seed_bytes: usize,
-    /// Observation prompts for the converging path (one coarse filter per batch).
+    /// Observation prompts, one per batch.
     pub observation_bytes: usize,
-    /// Requests the converging path costs: one seed turn plus one observation.
+    /// Requests the converging path costs: one per batch.
     pub requests: usize,
 }
 
 impl PlannedPrompts {
     /// Bytes the converging path sends. A model that answers `<FINAL>` on the
-    /// first turn sends less; nothing sends more without extra tool calls.
+    /// first turn sends exactly this; extra tool calls add more.
     pub fn converging_bytes(&self) -> usize {
-        self.seed_bytes.saturating_add(self.observation_bytes)
+        self.observation_bytes
     }
 }
 
 /// Count the prompts the Reduce stage would send for `batches`.
 ///
-/// This runs the deterministic coarse filter locally for each batch, exactly as
-/// the live loop does after the model asks for it. No network access, and the
-/// observation prompt is not built for batches the filter cannot feed.
+/// Runs the same deterministic coarse filter the live loop runs locally before
+/// its first request. No network access.
 pub fn planned_prompts(batches: &[String], language: ReportLanguage) -> PlannedPrompts {
-    let mut planned = PlannedPrompts::default();
+    let mut planned = PlannedPrompts {
+        requests: batches.len(),
+        ..PlannedPrompts::default()
+    };
     for seed in batches {
-        planned.seed_bytes = planned
-            .seed_bytes
-            .saturating_add(initial_prompt(seed, language).len());
         let observation = Skill::CoarseFilter.run_with_language(seed, language);
         planned.observation_bytes = planned
             .observation_bytes
             .saturating_add(observation_prompt(&observation, language).len());
     }
-    planned.requests = batches.len().saturating_mul(2);
     planned
-}
-
-fn initial_prompt(seed: &str, report_language: ReportLanguage) -> String {
-    format!(
-        "You are sift's audit convergence model. Return exactly one of these formats:\n\
-         1. <TOOL_CALL>{{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}}</TOOL_CALL>\n\
-         2. <FINAL>Markdown risk ledger</FINAL>\n\
-         Available skills: coarse_filter and converge. To analyze the AST seed below, first call coarse_filter with input=\"$SEED\". After JSON findings, call converge or return FINAL. {rubric} {lang}\n\
-         AST seed(JSONL):\n{seed}",
-        rubric = SCOPE_RUBRIC,
-        lang = report_language.prompt_instruction()
-    )
 }
 
 fn observation_prompt(obs: &str, report_language: ReportLanguage) -> String {
@@ -324,31 +316,95 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_declares_tool_protocol() {
-        let p = initial_prompt("seed", ReportLanguage::En);
-        assert!(p.contains("<TOOL_CALL>"));
-        assert!(p.contains("\"$SEED\""));
-        assert!(p.contains("<FINAL>"));
-    }
-
-    #[test]
-    fn initial_prompt_declares_report_language() {
-        let p = initial_prompt("seed", ReportLanguage::Zh);
-        assert!(p.contains("Simplified Chinese"));
-    }
-
-    #[test]
     fn prompts_carry_scope_rubric() {
-        let initial = initial_prompt("seed", ReportLanguage::En);
-        assert!(initial.contains("Scope rules:"));
-        assert!(initial.contains("synthetic test fixtures"));
         let obs = observation_prompt("OBS", ReportLanguage::En);
         assert!(obs.contains("Scope rules:"));
+        assert!(obs.contains("synthetic test fixtures"));
         assert!(obs.contains("authoritative"));
+        assert!(obs.contains("<FINAL>"));
+    }
+
+    /// Records every prompt the loop sends, so tests can inspect what a model
+    /// would actually receive.
+    struct Recorder {
+        prompts: Mutex<Vec<String>>,
+        reply: String,
+    }
+
+    impl Recorder {
+        fn new(reply: &str) -> Self {
+            Self {
+                prompts: Mutex::new(Vec::new()),
+                reply: reply.to_string(),
+            }
+        }
+        fn first_prompt(&self) -> String {
+            self.prompts
+                .lock()
+                .ok()
+                .and_then(|prompts| prompts.first().cloned())
+                .unwrap_or_default()
+        }
+    }
+
+    impl Completer for Recorder {
+        fn ask(&self, prompt: &str) -> Result<String, CallError> {
+            if let Ok(mut prompts) = self.prompts.lock() {
+                prompts.push(prompt.to_string());
+            }
+            Ok(self.reply.clone())
+        }
     }
 
     #[test]
-    fn seed_alias_feeds_tool_observation() {
+    fn run_opens_on_the_deterministic_observation_not_the_seed() {
+        // A realistic batch: mostly inert evidence plus one risky call.
+        let seed = bulky_batch(0, 60_000);
+        let recorder = Recorder::new("<FINAL>ok</FINAL>");
+
+        assert_eq!(
+            ReAct::default().run(&recorder, &seed),
+            Outcome::Final("ok".into())
+        );
+
+        let prompts = recorder
+            .prompts
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default();
+        assert_eq!(prompts.len(), 1, "one batch is one request now");
+        let first = recorder.first_prompt();
+        assert!(
+            first.starts_with("OBSERVATION:"),
+            "the loop must open on the deterministic findings"
+        );
+        assert!(
+            first.contains("panic-edge"),
+            "the findings must name the rule the evidence trips"
+        );
+        assert!(
+            !first.contains("AST seed(JSONL)") && !first.contains("signatures"),
+            "the raw seed must not be sent to the model"
+        );
+        assert!(
+            first.len() * 5 < seed.len(),
+            "the observation ({}) should be far smaller than the seed ({})",
+            first.len(),
+            seed.len()
+        );
+    }
+
+    #[test]
+    fn run_discloses_the_report_language_to_the_model() {
+        let recorder = Recorder::new("<FINAL>ok</FINAL>");
+        let _ = ReAct::with_language(ReportLanguage::Zh).run(&recorder, "seed");
+        assert!(recorder.first_prompt().contains("Simplified Chinese"));
+    }
+
+    #[test]
+    fn tool_calls_still_resolve_the_seed_alias() {
+        // A model that asks for the filter again must not dead-end: the alias
+        // resolves to the batch and feeds the observation back.
         struct Probe {
             step: AtomicU8,
         }
@@ -417,48 +473,49 @@ mod tests {
         }
     }
 
+    /// Read the batch number back out of a prompt. Findings carry the record
+    /// path, so the path is what survives into what the model receives.
     fn batch_index(prompt: &str) -> usize {
-        prompt
-            .split("BATCH_INDEX:")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|idx| idx.parse().ok())
-            .unwrap_or(0)
+        let Some(rest) = prompt.split("src/batch_").nth(1) else {
+            return 0;
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().unwrap_or(0)
+    }
+
+    /// One record per batch, padded with inert evidence so realistic batch sizes
+    /// can be exercised without inventing thousands of real symbols.
+    fn bulky_batch(idx: usize, filler_bytes: usize) -> String {
+        let filler = "z".repeat(filler_bytes);
+        format!(
+            r#"{{"path":"src/batch_{idx}.rs","signatures":["fn {filler}()"],"locations":[{{"kind":"call","line":1,"text":"x.unwrap"}}]}}"#
+        )
     }
 
     fn batches(total: usize) -> Vec<String> {
-        (0..total).map(|idx| format!("BATCH_INDEX:{idx}")).collect()
+        (0..total).map(|idx| bulky_batch(idx, 64)).collect()
     }
 
     #[test]
-    fn planned_prompts_count_both_reduce_turns() {
-        let batches = vec![
-            r#"{"path":"a.rs","locations":[]}"#.to_string(),
-            r#"{"path":"b.rs","locations":[]}"#.to_string(),
-        ];
+    fn planned_prompts_count_one_request_per_batch() {
+        // Real batch sizes: the fixed prompt overhead only dominates toy input.
+        let batches = vec![bulky_batch(0, 60_000), bulky_batch(1, 60_000)];
         let planned = planned_prompts(&batches, ReportLanguage::En);
 
-        // One seed turn plus one observation turn per batch.
-        assert_eq!(planned.requests, 4);
-        // The seed prompt carries the batch itself plus the protocol preamble.
-        let batch_bytes: usize = batches.iter().map(String::len).sum();
-        assert!(
-            planned.seed_bytes > batch_bytes,
-            "seed prompts ({}) must exceed the raw batches ({batch_bytes})",
-            planned.seed_bytes
-        );
-        // Even a clean batch gets a non-empty observation prompt.
+        // The raw seed is never sent, so a batch costs exactly one request.
+        assert_eq!(planned.requests, 2);
         assert!(
             planned.observation_bytes > 0,
-            "the observation turn must be counted, not assumed free"
+            "the observation prompt must be counted, not assumed free"
         );
-        assert_eq!(
-            planned.converging_bytes(),
-            planned.seed_bytes + planned.observation_bytes
+        assert_eq!(planned.converging_bytes(), planned.observation_bytes);
+        // The plan must be far below the seed it replaces: that is the saving.
+        let batch_bytes: usize = batches.iter().map(String::len).sum();
+        assert!(
+            planned.converging_bytes() * 5 < batch_bytes,
+            "observation prompts ({}) should be far smaller than the batches ({batch_bytes})",
+            planned.converging_bytes()
         );
-        // The seed turn alone is the floor: a model answering FINAL immediately
-        // never receives the observation prompts.
-        assert!(planned.converging_bytes() > planned.seed_bytes);
     }
 
     #[test]

@@ -1425,14 +1425,11 @@ struct BenchmarkTokens {
     estimation: &'static str,
     estimated_input_tokens: u64,
     estimated_output_tokens: u64,
-    /// Bytes of Reduce prompts the converging path would send: every batch's
-    /// seed turn plus its deterministic observation turn.
+    /// Bytes of Reduce prompts the converging path would send: one
+    /// deterministic observation per batch.
     planned_prompt_bytes: usize,
-    /// Requests the converging path costs (two per batch).
+    /// Requests the converging path costs (one per batch).
     planned_requests: usize,
-    /// Lower bound: a model that answers `<FINAL>` without calling the local
-    /// coarse filter only ever receives the seed turns.
-    seed_prompt_bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -1523,17 +1520,16 @@ impl BenchmarkReport {
                 },
             },
             tokens: BenchmarkTokens {
-                estimation: "ceil(planned_prompt_bytes / 4); tokenizer-free approximation of the converging Reduce path",
+                estimation: "ceil(planned_prompt_bytes / 4); tokenizer-free approximation of the Reduce path that actually runs",
                 estimated_input_tokens,
                 estimated_output_tokens,
                 planned_prompt_bytes: planned.converging_bytes(),
                 planned_requests: planned.requests,
-                seed_prompt_bytes: planned.seed_bytes,
             },
             cost,
             notes: vec![
                 "benchmark mode performs no model calls",
-                "planned_prompt_bytes counts one deterministic coarse_filter turn per batch; a model that answers FINAL immediately sends seed_prompt_bytes only",
+                "planned_prompt_bytes counts one deterministic observation per batch; the raw seed is never sent, and extra tool calls would cost more",
                 "token and cost values are estimates unless provider usage data is supplied externally",
             ],
         }
@@ -1803,6 +1799,15 @@ fn diagnostics_section(
         "| reduce | record_truncated | {} |\n",
         coverage.record_truncated
     ));
+    // Disclose the flow: the model converges on the deterministic findings and
+    // never receives the raw seed, so a reader can audit the cost claim.
+    let entry = match language {
+        ReportLanguage::En => "deterministic coarse_filter (raw seed not sent)",
+        ReportLanguage::Zh => {
+            "\u{786e}\u{5b9a}\u{6027} coarse_filter\u{ff08}\u{4e0d}\u{53d1}\u{9001}\u{539f}\u{59cb} seed\u{ff09}"
+        }
+    };
+    s.push_str(&format!("| reduce | entry | {entry} |\n"));
     s
 }
 

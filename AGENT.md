@@ -39,7 +39,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 | `src/surface.rs` | install-surface capability ledger (no model, target config never read) | P7 ✓ |
 | `src/diff.rs` | install-surface diff between two trees | P7 ✓ |
 | `src/model.rs` | model registry/client/timeout/breaker (clone-shared, atomic breaker) | P2 ✓ |
-| `src/react.rs` | ReACT state machine + skill match + order-preserving parallel Reduce batches | P3 ✓→P4 |
+| `src/react.rs` | ReACT state machine (opens on the local coarse filter) + skill match + order-preserving parallel Reduce batches | P3 ✓→P4 |
 | `src/skills.rs` | local skill fns (map/reduce) | P3 ✓→P4 |
 | `src/report.rs` | Markdown risk-list | P4 |
 | `src/audit.rs` | internal gate scoring | P5 |

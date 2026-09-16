@@ -131,12 +131,11 @@ sift ./repo --benchmark \
   --benchmark-estimated-output-tokens 2000
 ```
 
-输入 token 估算统计的是审计**实际会发出**的 Reduce prompt，而不只是 seed。
-每个批次要花一轮 seed prompt，加上模型请求本地 `coarse_filter` 之后的一轮
-observation prompt（承载确定性发现），因此 `tokens.planned_prompt_bytes`
-覆盖这两轮，`tokens.seed_prompt_bytes` 则是「模型第一轮直接回 `<FINAL>`」
-时的下限。统计 observation 轮需要在本地跑一遍该过滤器，这也是 benchmark
-模式比纯扫描多花零点几秒的原因；它依然不发起任何模型调用。
+输入 token 估算统计的是审计**实际会发出**的 Reduce prompt：每批次一个，
+承载确定性发现。原始 AST seed **不会**发给模型——本地 `coarse_filter`
+先跑，因此 `tokens.planned_prompt_bytes` 就是收敛路径真正传输的量。
+统计它需要在本地跑一遍该过滤器，这也是 benchmark 模式比纯扫描多花零点几秒
+的原因；它依然不发起任何模型调用。
 
 ## 支持语言
 

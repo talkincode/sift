@@ -231,9 +231,16 @@ fn main() -> ExitCode {
     }
 
     if cfg.benchmark {
+        // Count the Reduce prompts the converging path would send. This runs the
+        // deterministic coarse filter locally per batch; still no model calls.
+        let planned = react::planned_prompts(
+            &build_react_batches(&coverage, &seed_batches, cfg.report_language),
+            cfg.report_language,
+        );
         let report = BenchmarkReport::from_run(
             &cfg,
             &coverage,
+            &planned,
             scan_elapsed_ms,
             small_model_chunks_total,
             elapsed_ms(run_started),
@@ -1418,6 +1425,14 @@ struct BenchmarkTokens {
     estimation: &'static str,
     estimated_input_tokens: u64,
     estimated_output_tokens: u64,
+    /// Bytes of Reduce prompts the converging path would send: every batch's
+    /// seed turn plus its deterministic observation turn.
+    planned_prompt_bytes: usize,
+    /// Requests the converging path costs (two per batch).
+    planned_requests: usize,
+    /// Lower bound: a model that answers `<FINAL>` without calling the local
+    /// coarse filter only ever receives the seed turns.
+    seed_prompt_bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -1435,12 +1450,15 @@ impl BenchmarkReport {
     fn from_run(
         cfg: &Config,
         coverage: &InputCoverage,
+        planned: &react::PlannedPrompts,
         scan_elapsed_ms: u128,
         small_model_chunks_total: usize,
         total_elapsed_ms: u128,
         memory: BenchmarkMemory,
     ) -> Self {
-        let estimated_input_tokens = estimate_tokens_from_bytes(coverage.seed_bytes);
+        // Budget from what the Reduce stage would actually send, not from the
+        // seed alone: the seed is one of two turns per batch.
+        let estimated_input_tokens = estimate_tokens_from_bytes(planned.converging_bytes());
         let estimated_output_tokens = cfg.benchmark_estimated_output_tokens;
         let cost = BenchmarkCost::new(
             estimated_input_tokens,
@@ -1505,13 +1523,17 @@ impl BenchmarkReport {
                 },
             },
             tokens: BenchmarkTokens {
-                estimation: "ceil(seed_bytes_sent / 4); tokenizer-free approximation",
+                estimation: "ceil(planned_prompt_bytes / 4); tokenizer-free approximation of the converging Reduce path",
                 estimated_input_tokens,
                 estimated_output_tokens,
+                planned_prompt_bytes: planned.converging_bytes(),
+                planned_requests: planned.requests,
+                seed_prompt_bytes: planned.seed_bytes,
             },
             cost,
             notes: vec![
                 "benchmark mode performs no model calls",
+                "planned_prompt_bytes counts one deterministic coarse_filter turn per batch; a model that answers FINAL immediately sends seed_prompt_bytes only",
                 "token and cost values are estimates unless provider usage data is supplied externally",
             ],
         }

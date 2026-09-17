@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -1037,7 +1038,12 @@ fn parse_github_repo(input: &str) -> Result<GithubRepo, String> {
 }
 
 fn valid_github_segment(value: &str) -> bool {
+    // A leading dot is legal (`.github` is a real repository), but a bare dot
+    // segment is not an owner or repository: reject it here rather than let git
+    // fail later on a URL nobody could have meant.
     !value.is_empty()
+        && value != "."
+        && value != ".."
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
@@ -1055,13 +1061,22 @@ fn valid_git_ref_arg(value: &str) -> bool {
         && !value.ends_with(".lock")
 }
 
+/// Distinguishes checkouts created within one clock tick.
+///
+/// `SystemTime` can resolve two back-to-back calls to the same instant, so the
+/// timestamp alone does not make a checkout unique. That matters here because
+/// cleanup recursively deletes this path: a recycled name would let one run
+/// delete another run's checkout while it is still being audited.
+static CHECKOUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn temp_checkout_root(owner: &str, repo: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let seq = CHECKOUT_SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "sift-github-{owner}-{repo}-{}-{nanos}",
+        "sift-github-{owner}-{repo}-{}-{nanos}-{seq}",
         std::process::id()
     ))
 }
@@ -1372,9 +1387,28 @@ fn github_source_block(source: &GithubSource) -> String {
     )
 }
 
+/// A path this run created under the system temp directory.
+fn is_managed_checkout(path: &Path) -> bool {
+    let temp = std::env::temp_dir();
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.starts_with("sift-github-") && path.parent() == Some(temp.as_path())
+}
+
 fn cleanup_checkout(temp_root: &PathBuf, keep: bool) {
     if keep {
         eprintln!("github checkout preserved: {}", temp_root.display());
+        return;
+    }
+    // This is the one recursive delete in the program, and the intake clones
+    // untrusted repositories. Refuse anything that is not a checkout this
+    // process created, rather than trusting the caller's argument.
+    if !is_managed_checkout(temp_root) {
+        eprintln!(
+            "github checkout cleanup refused: {} is not a sift-managed temp checkout",
+            temp_root.display()
+        );
         return;
     }
     match std::fs::remove_dir_all(temp_root) {
@@ -2453,6 +2487,183 @@ mod tests {
         assert_eq!(output.stdout.len(), 262_144, "all output must be collected");
     }
 
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("sift-test-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn temp_checkout_root_is_a_single_component_of_the_temp_dir() {
+        let root = temp_checkout_root("owner", "repo");
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        let name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            name.starts_with("sift-github-owner-repo-"),
+            "unexpected name: {name}"
+        );
+
+        // Hostile-looking segments must stay inside one path component: the
+        // name is built by formatting, never by joining raw input.
+        let hostile = temp_checkout_root("..", "..");
+        assert_eq!(hostile.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(
+            hostile.components().count(),
+            std::env::temp_dir().components().count() + 1
+        );
+
+        // Two runs must not share a directory.
+        assert_ne!(temp_checkout_root("o", "r"), temp_checkout_root("o", "r"));
+    }
+
+    #[test]
+    fn cleanup_checkout_removes_only_managed_temp_dirs() {
+        // A managed checkout is removed.
+        let unique = temp_test_dir("managed");
+        let managed = std::env::temp_dir().join(format!(
+            "sift-github-owner-repo-{}",
+            unique.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        assert!(std::fs::create_dir_all(managed.join("nested")).is_ok());
+        assert!(is_managed_checkout(&managed));
+        cleanup_checkout(&managed, false);
+        assert!(!managed.exists(), "a managed checkout must be removed");
+
+        // `--keep` preserves it.
+        let kept = std::env::temp_dir().join(format!(
+            "sift-github-owner-repo-keep-{}",
+            std::process::id()
+        ));
+        assert!(std::fs::create_dir_all(&kept).is_ok());
+        cleanup_checkout(&kept, true);
+        assert!(kept.exists(), "--keep must preserve the checkout");
+        assert!(std::fs::remove_dir_all(&kept).is_ok());
+
+        // A directory this process did not create is left alone, even though
+        // it sits in the temp dir.
+        let foreign = temp_test_dir("foreign");
+        assert!(std::fs::create_dir_all(foreign.join("inner")).is_ok());
+        assert!(!is_managed_checkout(&foreign));
+        cleanup_checkout(&foreign, false);
+        assert!(foreign.exists(), "a foreign directory must survive");
+        assert!(std::fs::remove_dir_all(&foreign).is_ok());
+
+        // So is anything outside the temp dir, such as the audited repository.
+        let outside = temp_test_dir("outside").join("project");
+        assert!(std::fs::create_dir_all(&outside).is_ok());
+        assert!(!is_managed_checkout(&outside));
+        cleanup_checkout(&outside, false);
+        assert!(outside.exists(), "a non-temp path must survive");
+        if let Some(parent) = outside.parent() {
+            assert!(std::fs::remove_dir_all(parent).is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_exit_codes_propagate() {
+        let success = run_command_with_timeout(shell("exit 0"), Duration::from_secs(30));
+        let Ok(success) = success else { return };
+        assert_eq!(exit_code_from_output(&success), ExitCode::SUCCESS);
+
+        let rejection = run_command_with_timeout(shell("exit 3"), Duration::from_secs(30));
+        let Ok(rejection) = rejection else { return };
+        assert_eq!(exit_code_from_output(&rejection), ExitCode::from(3));
+
+        // A child killed by a signal has no exit code; that must not read as
+        // success for the intake's verdict propagation.
+        let signalled = run_command_with_timeout(shell("kill -TERM $$"), Duration::from_secs(30));
+        let Ok(signalled) = signalled else { return };
+        assert!(
+            signalled.status.code().is_none(),
+            "a signalled child reports no code"
+        );
+        assert_eq!(exit_code_from_output(&signalled), ExitCode::FAILURE);
+    }
+
+    fn sample_github_source() -> GithubSource {
+        GithubSource {
+            repo: "owner/repo".to_string(),
+            url: "https://github.com/owner/repo.git".to_string(),
+            requested_ref: "main".to_string(),
+            resolved_commit: "0123456789abcdef".to_string(),
+            file_count: 12,
+            byte_size: 4096,
+            has_submodules: true,
+            has_lfs: false,
+            checkout_path: PathBuf::from("/tmp/sift-github-owner-repo-1-2"),
+            cleanup: "removed",
+        }
+    }
+
+    #[test]
+    fn github_source_json_carries_every_field() {
+        let value = github_source_json(&sample_github_source());
+        assert_eq!(value["repo"], "owner/repo");
+        assert_eq!(value["url"], "https://github.com/owner/repo.git");
+        assert_eq!(value["requested_ref"], "main");
+        assert_eq!(value["resolved_commit"], "0123456789abcdef");
+        assert_eq!(value["file_count"], 12);
+        assert_eq!(value["byte_size"], 4096);
+        assert_eq!(value["has_submodules"], true);
+        assert_eq!(value["has_lfs"], false);
+        assert_eq!(value["checkout_path"], "/tmp/sift-github-owner-repo-1-2");
+        assert_eq!(value["cleanup"], "removed");
+
+        let block = github_source_block(&sample_github_source());
+        for expected in [
+            "github_repo: owner/repo",
+            "github_url: https://github.com/owner/repo.git",
+            "requested_ref: main",
+            "resolved_commit: 0123456789abcdef",
+            "file_count: 12",
+            "byte_size: 4096",
+            "has_submodules: true",
+            "has_lfs: false",
+            "checkout_path: /tmp/sift-github-owner-repo-1-2",
+            "cleanup: removed",
+        ] {
+            assert!(
+                block.contains(expected),
+                "source block is missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_and_benchmark_output_gain_the_github_source() {
+        let source = sample_github_source();
+
+        let merged = json_with_github_source(r#"{"verdict":"ACCEPT","schema_version":1}"#, &source);
+        assert!(merged.is_ok(), "valid gate JSON must merge");
+        let Ok(merged) = merged else { return };
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap_or_default();
+        assert_eq!(value["verdict"], "ACCEPT", "existing fields must survive");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["github_source"]["repo"], "owner/repo");
+
+        let merged = benchmark_with_github_source(r#"{"schema_version":1}"#, &source);
+        assert!(merged.is_ok(), "valid benchmark JSON must merge");
+        let Ok(merged) = merged else { return };
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap_or_default();
+        assert_eq!(
+            value["github_source"]["resolved_commit"],
+            "0123456789abcdef"
+        );
+
+        // Unparseable child output and non-object roots are failures, not
+        // silently degraded reports.
+        assert!(json_with_github_source("not json", &source).is_err());
+        assert!(json_with_github_source("[1,2]", &source).is_err());
+        assert!(benchmark_with_github_source("", &source).is_err());
+        assert!(benchmark_with_github_source(r#""text""#, &source).is_err());
+    }
+
     #[test]
     fn missing_key_hint_stays_available_to_main() {
         assert!(config::missing_large_key_hint().contains("SIFT_API_KEY"));
@@ -2639,6 +2850,13 @@ mod tests {
         assert!(parse_github_repo("https://example.com/jamiesun/sift").is_err());
         assert!(parse_github_repo("https://token@github.com/jamiesun/sift").is_err());
         assert!(parse_github_repo("too/many/segments").is_err());
+        // Dot segments are not owners or repositories, and must be rejected
+        // before a git process is spawned on a URL nobody could have meant.
+        assert!(parse_github_repo("../..").is_err());
+        assert!(parse_github_repo("./repo").is_err());
+        assert!(parse_github_repo("owner/..").is_err());
+        // A leading dot is still a real repository name.
+        assert!(parse_github_repo("owner/.github").is_ok());
     }
 
     #[test]

@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `07a572f` —「perf(reduce): start the model on the deterministic findings, not the seed (#7)」，外加本次会话的子进程 deadline 与报告保存修复（`src/main.rs`、`tests/full_audit_mock.rs`） |
+| 提交 | `dd5bffa` —「fix: keep a chatty subprocess alive, and save the report byte-for-byte (#8)」，外加本次会话的 github intake 加固（`src/main.rs`） |
 | 评估日期 | 2026-09-16 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce（并行批次、成本核算、入口）、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 203 个通过，0 个失败（`src/**` 内 162 个单测 + `tests/*.rs` 内 41 个黑盒测试） |
+| 测试 | ✅ 208 个通过，0 个失败（`src/**` 内 167 个单测 + `tests/*.rs` 内 41 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -150,7 +150,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | # | Type | 条目 | 状态 | 证据 |
 |---|---|------|------|------|
 | 1 | F | `--benchmark` 本地 telemetry（不调用模型；可选 USD 成本估算） | ✅ 完成 | `tests/benchmark_mode.rs`（3/3 通过）。输入 token 来自 `react::planned_prompts`：Reduce 阶段实际发送的 observation prompt，每批次一个（RAM-TA3 planned 653,688 vs 实发 653,360）。`tests/full_audit_mock.rs` 用记录每个请求体的 mock 端点固定该契约：`planned_requests` 等于实际请求数、`planned_prompt_bytes` 覆盖实发量且超出不超过 10%、且发送量远低于 seed |
-| 2 | F | `sift github owner/repo` 安全 intake——绝不 build/install/跑 hook/碰 submodule；扫描前检查文件/字节上限、`.gitmodules`、Git LFS | ✅ 完成 | `run_github_intake`、`parse_github_repo`、`inspect_checkout_dir`；测试 `github_repo_parser_accepts_owner_repo_and_https`、`checkout_inspection_reports_lfs_and_limits`、`github_intake_rejects_non_github_url_without_network`（黑盒）。`git` fetch 与递归调用本地 `sift` 均跑在 `run_command_with_timeout` 之下（120s / 600s 硬 deadline，超时即 kill）。该助手现在会在读取线程上持续排空两条管道——子进程一旦写满管道缓冲就会阻塞在写操作上，旧实现会把这种「只是话多」的进程当成挂死在 deadline 处杀掉（仅 agent-gate 子进程在 RAM-TA3 上就有 686 KB 输出）。测试 `command_timeout_kills_a_hung_child`、`command_timeout_returns_output_of_a_finished_child`、`command_timeout_drains_output_larger_than_the_pipe_buffer` |
+| 2 | F | `sift github owner/repo` 安全 intake——绝不 build/install/跑 hook/碰 submodule；扫描前检查文件/字节上限、`.gitmodules`、Git LFS | ✅ 完成 | `run_github_intake`、`parse_github_repo`、`inspect_checkout_dir`；测试 `github_repo_parser_accepts_owner_repo_and_https`、`checkout_inspection_reports_lfs_and_limits`、`github_intake_rejects_non_github_url_without_network`（黑盒）。`git` fetch 与递归调用本地 `sift` 均跑在 `run_command_with_timeout` 之下（120s / 600s 硬 deadline，超时即 kill）。该助手现在会在读取线程上持续排空两条管道——子进程一旦写满管道缓冲就会阻塞在写操作上，旧实现会把这种「只是话多」的进程当成挂死在 deadline 处杀掉（仅 agent-gate 子进程在 RAM-TA3 上就有 686 KB 输出）。测试 `command_timeout_kills_a_hung_child`、`command_timeout_returns_output_of_a_finished_child`、`command_timeout_drains_output_larger_than_the_pipe_buffer` | 测试 `temp_checkout_root_is_a_single_component_of_the_temp_dir`、`cleanup_checkout_removes_only_managed_temp_dirs`、`child_exit_codes_propagate`、`github_source_json_carries_every_field`、`gate_and_benchmark_output_gain_the_github_source` 覆盖周边：临时检出目录命名（同一时钟滴答内仍唯一、始终只占一个临时目录组件）、递归删除守卫、退出码传播（被信号杀死的子进程算失败而不是成功）、以及 `github_source` 注入 gate/benchmark JSON 及其错误路径。点段（`../..`）现在在解析阶段就被拒绝，而不是等 git 内部报错。
 | 3 | F | `sift doctor`——配置/密钥/端点诊断 | ✅ 完成 | `tests/doctor.rs` 每个用例都用独立的临时 `HOME` 跑真实二进制：健康配置（PASS 行，含 `permissions 600`）、非法 TOML（FAIL + 退出 1）、配置缺失（创建不含密钥的默认配置、WARN、退出 0）、权限 644（仅告警）、本地端点无 Key（PASS，无需鉴权）、公网端点缺 `key_env`（FAIL + 退出 1）、Azure 风格 Key 配 `api.openai.com`（FAIL + 401 警告），以及 Key 值绝不出现在 stdout/stderr |
 | 4 | F | `--save`/`--save-to` 持久化报告（`reports/sift-audit-result-YYYYMMDD-NNN.md`） | ✅ 完成 | `main.rs` 中 `save_audit_result`、`next_audit_result_path`、`utc_yyyymmdd`、`civil_from_days`；测试 `audit_result_paths_number_within_a_date` 覆盖编号逻辑（其他日期与不可解析文件名不会推进计数、不复用空号、目录缺失时仍从 001 起）。`full_audit_saves_the_report_it_prints` 用 mock 完整审计跑两次 `--save-to`，断言保存文件与 stdout 逐字节一致，且第二次落为 `-002.md`。保存文件现在会带上 stdout 具备的结尾换行 |
 | 5 | F | `--report-language {en,zh}` 双语 Markdown 报告 | ✅ 完成 | `ReportLanguage`；测试 `localized_headings_render_for_zh` |

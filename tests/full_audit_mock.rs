@@ -262,6 +262,108 @@ fn full_audit_overlaps_reduce_batches_against_a_mock_endpoint() {
     fs::remove_dir_all(&repo).ok();
 }
 
+#[test]
+fn full_audit_saves_the_report_it_prints() {
+    let mut endpoint = MockEndpoint::start(Duration::from_millis(20));
+
+    let home = unique_dir("save-home");
+    let sift_home = home.join(".sift");
+    fs::create_dir_all(&sift_home).expect("create isolated sift home");
+    fs::write(
+        sift_home.join("config.toml"),
+        format!(
+            "concurrency = 2\nmax_bytes = 524288\n[[model]]\nrole = \"large\"\nendpoint = \"{}\"\nmodel = \"mock\"\nkey_env = \"SIFT_API_KEY\"\ntimeout_ms = 30000\nmax_retries = 1\n",
+            endpoint.endpoint
+        ),
+    )
+    .expect("write isolated config");
+
+    let repo = unique_dir("save-repo");
+    write_seed_repo(&repo);
+    let out_dir = unique_dir("save-out");
+
+    // `--save-to` implies saving; the report must land in the requested dir
+    // under the dated name, and match what was printed.
+    let output = run_sift(
+        &home,
+        &[
+            repo.display().to_string(),
+            "--save-to".to_string(),
+            out_dir.display().to_string(),
+        ],
+    );
+    endpoint.shutdown();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the mock audit must succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let saved: Vec<PathBuf> = fs::read_dir(&out_dir)
+        .expect("the save directory must exist")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(saved.len(), 1, "one audit, one file: {saved:?}");
+
+    let name = saved[0]
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    assert!(
+        name.starts_with("sift-audit-result-") && name.ends_with("-001.md"),
+        "unexpected report name: {name}"
+    );
+    assert!(
+        stderr.contains("audit result saved:"),
+        "saving must be reported on stderr\nstderr:\n{stderr}"
+    );
+
+    let contents = fs::read_to_string(&saved[0]).expect("read saved report");
+    assert_eq!(
+        contents, stdout,
+        "the saved report must be byte-identical to what was printed"
+    );
+
+    // A second audit in the same directory must not overwrite the first.
+    let mut endpoint = MockEndpoint::start(Duration::from_millis(20));
+    fs::write(
+        sift_home.join("config.toml"),
+        format!(
+            "concurrency = 2\nmax_bytes = 524288\n[[model]]\nrole = \"large\"\nendpoint = \"{}\"\nmodel = \"mock\"\nkey_env = \"SIFT_API_KEY\"\ntimeout_ms = 30000\nmax_retries = 1\n",
+            endpoint.endpoint
+        ),
+    )
+    .expect("rewrite isolated config");
+    let second = run_sift(
+        &home,
+        &[
+            repo.display().to_string(),
+            "--save-to".to_string(),
+            out_dir.display().to_string(),
+        ],
+    );
+    endpoint.shutdown();
+    assert!(second.status.success(), "the second audit must succeed");
+
+    let mut names: Vec<String> = fs::read_dir(&out_dir)
+        .expect("save directory")
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 2, "reports must accumulate: {names:?}");
+    assert!(
+        names.iter().any(|name| name.ends_with("-002.md")),
+        "the second report must take the next number: {names:?}"
+    );
+
+    cleanup(&home, &repo);
+    fs::remove_dir_all(&out_dir).ok();
+}
+
 fn run_sift(home: &Path, args: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_sift"))
         .args(args)
@@ -293,6 +395,11 @@ fn write_seed_repo(root: &Path) {
         src.push_str("    0\n}\n");
         fs::write(root.join(format!("module_{file:03}.rs")), src).expect("write fixture file");
     }
+}
+
+fn cleanup(home: &Path, repo: &Path) {
+    fs::remove_dir_all(home).ok();
+    fs::remove_dir_all(repo).ok();
 }
 
 fn unique_dir(name: &str) -> PathBuf {

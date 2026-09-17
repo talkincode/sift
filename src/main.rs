@@ -478,7 +478,11 @@ fn save_audit_result(cfg: &Config, markdown: &str) {
     }
     let date = utc_yyyymmdd();
     let path = next_audit_result_path(&dir, &date);
-    match std::fs::write(&path, markdown) {
+    // Write exactly what stdout carried: the report plus the newline `println!`
+    // appends, so the saved file is byte-identical to what the user saw and a
+    // plain Markdown file still ends with a newline.
+    let contents = format!("{markdown}\n");
+    match std::fs::write(&path, contents) {
         Ok(()) => eprintln!("audit result saved: {}", path.display()),
         Err(e) => eprintln!("cannot write audit result {}: {e}", path.display()),
     }
@@ -1247,23 +1251,34 @@ fn run_local_sift_for_github(github: &GithubCli, checkout: &Path) -> Result<Outp
     run_command_with_timeout(command, Duration::from_secs(600))
 }
 
+/// Run a command under a hard deadline, collecting its output.
+///
+/// Both pipes are drained on their own threads while the child runs. A child
+/// that fills a pipe buffer blocks on write and would never exit, so polling
+/// the process without reading it would kill a healthy command at the deadline
+/// — `sift github owner/repo` runs a child whose report easily exceeds the
+/// buffer.
 fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|e| format!("cannot spawn command: {e}"))?;
+
+    let stdout = drain_pipe(child.stdout.take());
+    let stderr = drain_pipe(child.stderr.take());
+
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|e| format!("cannot collect command output: {e}"));
-            }
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // The readers are deliberately dropped, not joined: a
+                    // grandchild can still hold the pipe open, and waiting for
+                    // it would reintroduce the unbounded block this deadline
+                    // exists to prevent.
                     return Err(format!("command timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -1274,7 +1289,33 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Result<O
                 return Err(format!("cannot poll command: {e}"));
             }
         }
-    }
+    };
+
+    Ok(Output {
+        status,
+        stdout: collect_pipe(stdout),
+        stderr: collect_pipe(stderr),
+    })
+}
+
+/// Read one piped stream to EOF on its own thread, so the child never blocks.
+fn drain_pipe<R>(reader: Option<R>) -> Option<std::thread::JoinHandle<Vec<u8>>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    reader.map(|mut reader| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut reader, &mut buf);
+            buf
+        })
+    })
+}
+
+fn collect_pipe(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
 }
 
 fn benchmark_with_github_source(stdout: &str, source: &GithubSource) -> Result<String, String> {
@@ -2288,6 +2329,125 @@ mod tests {
             );
             assert_ne!(metric.source, "unavailable");
         }
+    }
+
+    #[test]
+    fn audit_result_paths_number_within_a_date() {
+        let dir = std::env::temp_dir().join(format!(
+            "sift-save-path-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+
+        // `Path::ends_with` compares whole components, so compare file names.
+        fn name(path: &Path) -> String {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }
+
+        // Nothing yet: the first file of the day.
+        let first = next_audit_result_path(&dir, "20260916");
+        assert_eq!(
+            name(&first),
+            "sift-audit-result-20260916-001.md",
+            "unexpected first path: {}",
+            first.display()
+        );
+        assert!(std::fs::write(&first, "one").is_ok());
+
+        // Files for other dates, unrelated names, and unparsable numbers must
+        // not move the counter.
+        for name in [
+            "sift-audit-result-20260915-009.md",
+            "note.md",
+            "sift-audit-result-20260916-abc.md",
+            "sift-audit-result-20260916-",
+        ] {
+            assert!(std::fs::write(dir.join(name), "x").is_ok());
+        }
+        let second = next_audit_result_path(&dir, "20260916");
+        assert_eq!(
+            name(&second),
+            "sift-audit-result-20260916-002.md",
+            "unrelated names must not advance the counter"
+        );
+
+        // Existing numbers are respected, and gaps are not reused.
+        assert!(std::fs::write(dir.join("sift-audit-result-20260916-007.md"), "x").is_ok());
+        let third = next_audit_result_path(&dir, "20260916");
+        assert_eq!(
+            name(&third),
+            "sift-audit-result-20260916-008.md",
+            "the next free number must follow the highest"
+        );
+
+        // A missing directory is not an error: it just means numbering starts.
+        let missing = dir.join("absent");
+        let fresh = next_audit_result_path(&missing, "20260916");
+        assert_eq!(
+            name(&fresh),
+            "sift-audit-result-20260916-001.md",
+            "a missing directory must start numbering"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a portable shell command; CI runs macOS and Linux only.
+    #[cfg(unix)]
+    fn shell(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_returns_output_of_a_finished_child() {
+        let output = run_command_with_timeout(shell("printf hello"), Duration::from_secs(30));
+        assert!(output.is_ok(), "a quick command must succeed");
+        let Ok(output) = output else { return };
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello");
+        assert!(output.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_kills_a_hung_child() {
+        let started = Instant::now();
+        let result = run_command_with_timeout(shell("sleep 30"), Duration::from_millis(300));
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "a hung command must fail");
+        let message = match result {
+            Err(message) => message,
+            Ok(_) => return,
+        };
+        assert!(message.contains("timed out"), "unexpected error: {message}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the deadline must not wait for the child, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_drains_output_larger_than_the_pipe_buffer() {
+        // A child that fills the stdout pipe blocks on write until someone
+        // reads it. Polling the process without draining would time out a
+        // healthy command, which is exactly the failure this guards.
+        let output =
+            run_command_with_timeout(shell("head -c 262144 /dev/zero"), Duration::from_secs(30));
+        assert!(
+            output.is_ok(),
+            "a chatty but healthy command must not be killed"
+        );
+        let Ok(output) = output else { return };
+
+        assert_eq!(output.stdout.len(), 262_144, "all output must be collected");
     }
 
     #[test]

@@ -903,6 +903,10 @@ fn run_github_intake(github: GithubCli) -> ExitCode {
             "github intake error: cannot create temporary checkout {}: {e}",
             checkout.display()
         );
+        // Every other early return cleans up; `create_dir_all` can leave the
+        // parent behind when only the child fails, so do not make this the one
+        // path that leaks a checkout.
+        cleanup_checkout(&temp_root, github.keep_checkout);
         return ExitCode::FAILURE;
     }
 

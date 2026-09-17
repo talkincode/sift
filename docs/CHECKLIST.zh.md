@@ -235,7 +235,7 @@ ROADMAP 状态：标题未标 ✓，但已有相当充分的证据。
 | 2 | 不做运行时插件/动态技能注册 | ✅ 守住 | `skills.rs::Skill` 是编译期 `enum` + `match`；无动态加载类依赖 |
 | 3 | 不做服务化/Web UI/多租户 | ✅ 守住 | `Cargo.toml` 中无 web-server crate；只通过 `clap` 提供 CLI |
 | 4 | 不允许 panic 主进程 | ✅ 守住（启发式，非形式化证明） | internal-gate 对显式 `panic!` 和 `unwrap()`/`expect()` 字面模式检查均 PASS。注意：release profile 里的 `panic = "abort"` 只是改变了*一旦真的 panic*时的 unwind 行为，本身并不是「不会 panic」的保证；真正的保证来自源码文本扫描，它无法捕捉例如下标越界/溢出类 panic |
-| 5 | 不允许无超时阻塞 | ✅ 守住 | 模型调用：`model.rs` 中的 `ureq` timeout；子进程：`run_command_with_timeout`（git fetch 120s，递归调用本地 `sift` 600s），它在读取线程上排空两条管道，避免把话多的子进程误判为挂死，超时仍会 kill |
+| 5 | 不允许无超时阻塞 | ✅ 守住 | 模型调用：`model.rs` 中的 `ureq` timeout；子进程：三个 spawn 点（git fetch 120s、递归调用本地 `sift` 600s、`eval-corpus` fixture 120s）现在全部跑在 `run_command_with_timeout` 之下，它在读取线程上排空两条管道，避免把话多的子进程误判为挂死，超时仍会 kill。`sift eval-corpus` 此前用的是裸 `Command::output()`，完全没有 deadline |
 | 6 | 模块审计不能膨胀成全局 | ✅ 守住 | 见 P4a #9 |
 | 7 | 不靠「直接试用」替代审计 | ✅ 守住 | `sift github` 无论 flag 如何都绝不 build/install/跑 hook/碰 submodule；`GithubCli` 上的 `--no-build`/`--no-install` 是明确的安全意图标记，不是开关——工具本来就两种情况下都不会 build 或 install |
 | 8 | 脚手架不得冒充产品能力 | ✅ 守住 | 小模型 Map 在代码输出和文档中都被明确标成「未激活的诊断脚手架」，不计入已交付的默认行为 |

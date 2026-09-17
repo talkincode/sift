@@ -593,16 +593,19 @@ fn run_eval_corpus(eval: EvalCorpusCli) -> ExitCode {
     for case in cases {
         let fixture = fixtures.join(case.name);
         let started = Instant::now();
-        let output =
-            Command::new(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sift")))
-                .arg(&fixture)
-                .arg("--agent-gate")
-                .arg("--format")
-                .arg("json")
-                .env_remove("SIFT_INTERNAL_GATE")
-                .env_remove("SIFT_API_KEY")
-                .env_remove("SIFT_SMALL_KEY")
-                .output();
+        // Every subprocess runs under a deadline; a fixture that hangs the gate
+        // must fail this corpus run, not block it forever.
+        let mut command =
+            Command::new(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sift")));
+        command
+            .arg(&fixture)
+            .arg("--agent-gate")
+            .arg("--format")
+            .arg("json")
+            .env_remove("SIFT_INTERNAL_GATE")
+            .env_remove("SIFT_API_KEY")
+            .env_remove("SIFT_SMALL_KEY");
+        let output = run_command_with_timeout(command, Duration::from_secs(120));
         let elapsed = elapsed_ms(started);
         let Ok(output) = output else {
             failed = true;

@@ -111,6 +111,24 @@ script、hook、install 命令或 submodule。扫描前会检查 checkout 文件
 `rule`、`severity`、`reason` 配置；命中的 policy 决策会出现在文本和 JSON
 门禁输出中。
 
+policy 作用于 `--agent-gate`。它的判定顺序固定，任何改变发现的决策都会被
+报告出来：
+
+1. `[[allowlist]]` 压制命中的发现（或可疑 artifact），并附上 reason。
+2. `[[denylist]]` 把命中的发现提升为 `high`。
+3. `[[severity_override]]` 最后设置严重性，因此它会覆盖同一发现上的
+   denylist 命中。
+
+`path` 在把 `\` 归一化为 `/` 之后按**子串**匹配路径的任意位置，所以模式要写具体：
+`path = "src"` 也会匹配 `vendor/src/`。每个条目必须设置 `path` 或 `rule`；
+两者都没有的条目会被当作无效配置拒绝，而不是静默匹配一切。
+
+policy 可以把任何发现的严重性**调低**，但不能把 test 或 fixture 路径抬到
+`low` 以上：台账明确声明这些路径有上限，模型 rubric 也保持该约束。被上限
+拒绝的请求会报告为
+`held <rule> at <path> at low: fixture paths are capped (policy asked for high)`，
+既不会丢弃，也不会被静默放行。
+
 首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
 
 完整审计的 stdout 只保留最终 Markdown 报告；进度、状态和 debug 诊断都走 stderr，长任务不会看起来像卡死，也不影响下游工具安全消费 stdout。

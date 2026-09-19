@@ -120,6 +120,26 @@ Project-local policy lives in `sift-policy.toml`. It supports
 `[[severity_override]]` entries keyed by `path`, `rule`, `severity`, and
 `reason`; applied policy decisions are shown in text and JSON gate output.
 
+Policy applies to `--agent-gate`. It resolves in a fixed order, and every
+decision that changes a finding is reported:
+
+1. `[[allowlist]]` suppresses a matching finding (or suspicious artifact), with
+   its reason attached.
+2. `[[denylist]]` raises a match to `high`.
+3. `[[severity_override]]` sets the severity last, so it wins over a denylist
+   match on the same finding.
+
+`path` matches anywhere in the finding's path after `\` is normalized to `/`,
+so keep patterns specific: `path = "src"` also matches `vendor/src/`. A matcher
+must set `path` or `rule`; a policy entry with neither is rejected as an invalid
+config rather than silently matching everything.
+
+Policy may lower any finding's severity, but it cannot lift a test or fixture
+path above `low`: the ledger states that those paths are capped, and the model
+rubric preserves that. A request the cap refuses is reported as
+`held <rule> at <path> at low: fixture paths are capped (policy asked for high)`
+rather than being dropped or silently honoured.
+
 On first run, sift creates `~/.sift/config.toml` from the built-in default
 template. The default file contains only non-secret settings; put model keys in
 environment variables or pass `--api-key-file`.

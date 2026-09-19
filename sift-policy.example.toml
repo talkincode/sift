@@ -1,5 +1,11 @@
 # Optional project-local policy. Copy to sift-policy.toml at the repository root.
 # Policy files do not contain secrets.
+#
+# Policy applies to `--agent-gate`. Order is allowlist (suppress), then denylist
+# (raise to high), then severity_override (last word). `path` matches anywhere in
+# the finding's path, so keep patterns specific; every entry needs `path` or
+# `rule`. Policy may lower severity anywhere, but cannot lift a test or fixture
+# path above low.
 
 # Treat very large scans as incomplete until reviewed.
 max_candidate_files = 20000

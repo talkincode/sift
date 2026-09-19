@@ -13,7 +13,7 @@
 | 评估日期 | 2026-09-16 — 本次会话重新验证了构建、测试、门禁，以及 P0/P1 扫描与 P4a Reduce（并行批次、成本核算、入口）、P4c `doctor`、缺 Key 门禁相关条目；本次未触及的阶段条目仍沿用 `f9a374b` 的审计结果 |
 | `cargo build` | ✅ 通过 |
 | `make ci`（`fmt-check` + `test` + `clippy -D warnings` + `internal-gate`） | ✅ 通过，退出码 0 |
-| 测试 | ✅ 217 个通过，0 个失败（`src/**` 内 176 个单测 + `tests/*.rs` 内 41 个黑盒测试） |
+| 测试 | ✅ 221 个通过，0 个失败（`src/**` 内 176 个单测 + `tests/*.rs` 内 45 个黑盒测试） |
 | 内部质量门禁（`reports/internal-gate.md`） | ✅ 14/14 检查 PASS，0 WARN，0 FAIL |
 
 ## 图例
@@ -125,7 +125,7 @@ ROADMAP 状态：标题未标 ✓；README 自述「进行中」。这是功能�
 | 5 | F | 单条记录截断可见性（原因、原始字节 vs 压缩后字节） | ✅ 完成 | `struct TruncatedRecord`、`compact_seed_record_with_limits`；测试 `compact_seed_record_caps_oversized_files`；internal-gate PASS「Model seed truncation is reported」 |
 | 6 | G | 在已知样本上命中预埋风险 | ✅ 完成 | `tests/repo_intake_fixtures.rs`（10 个恶意样本 + 1 个良性样本全部通过） |
 | 7 | G | 完整审计 stdout 只含最终报告 | ✅ 完成 | internal-gate PASS「Full audit stdout is reserved for the final report」；测试 `scan_only_stdout_remains_jsonl_not_benchmark_json` |
-| 8 | G | 无效配置明确失败，绝不静默回退默认值 | ✅ 完成 | 测试 `dirty_values_reject_config_not_silent_default`、`valid_toml_wrong_types_reject_config_not_silent_default`、`rejects_dirty_env_lines` |
+| 8 | G | 无效配置明确失败，绝不静默回退默认值 | ✅ 完成 | 测试 `dirty_values_reject_config_not_silent_default`、`valid_toml_wrong_types_reject_config_not_silent_default`、`rejects_dirty_env_lines` | `tests/policy_cli.rs` 同时端到端覆盖 policy 部分：磁盘上的 allowlist 压制已复核的 fixture 并披露、只写 rule 的 denylist 无法把 fixture 抬过上限且会报告 `held ...`、override 能调整生产路径发现的严重性，而既无 `path` 也无 `rule` 的条目以退出码 1 失败并指出缺失条件。最后一个用例还发现配置错误会丢掉根因：加载器只报 `invalid policy file <path>`。`main` 现在打印完整错误链（`{e:#}`），因此信息变为 `invalid policy file <path>: policy key allowlist entries require path or rule`。
 | 9 | G | `--module` 审计限定在项目根内，不串到全局 | ✅ 完成 | 测试 `absolute_module_must_stay_inside_target`、`absolute_module_inside_target_is_allowed`；internal-gate PASS「Module path is contained by project root」 |
 | 10 | G | fake-endpoint 完整审计 smoke 证明用户路径可用 | ✅ 完成 | `tests/full_audit_mock.rs` 在 `127.0.0.1:0` 起一个本地 OpenAI 兼容 mock，把隔离的 `~/.sift/config.toml` 指向它，并用真实二进制跑通默认的纯 Reduce 路径：请求 5 个批次、峰值 4 个在途、退出码 0、stdout 有收敛表格行。取代了人工证据 `reports/full-audit-local-model-test.md`（该报告早于 small-model Map 默认不激活的行为） |
 | 11 | F | 互不依赖的 Reduce 批次最多按 `concurrency` 并行（模型侧封顶 8），并按批序合并 | ✅ 完成 | `react::run_batches` + `react::MAX_REDUCE_PARALLEL`；`ModelClient` 克隆共享同一个 `Arc<dyn Transport>` 与同一个原子熔断器（`clones_share_one_breaker`）。单测 `run_batches_overlaps_work_across_workers`、`run_batches_returns_batch_order_not_completion_order`、`run_batches_with_one_worker_stays_serial`、`run_batches_reports_partial_without_dropping_other_batches`；`tests/full_audit_mock.rs` 端到端证明并发 |
